@@ -1415,6 +1415,7 @@ export default function App() {
   const [tab, setTab] = useState("dashboard");
   const [monthKey, setMonthKey] = useState(currentMonthKey());
   const saveTimer = useRef(null);
+  const importInputRef = useRef(null);
 
   useEffect(() => {
     try {
@@ -1476,7 +1477,6 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
-  const importInputRef = useRef(null);
   const importBackup = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;

@@ -48,6 +48,12 @@ export async function extractLinesFromPdf(file) {
 
 const TAX_KEYWORDS = /(IVA|IMPUESTO|PERCEPCI[OÓ]N|SELLADO|SEGURO|CARGO|INTER[EÉ]S|COMISI[OÓ]N|MANTENIMIENTO|ARANCEL)/i;
 
+/* Distintos guiones "raros" que usan los generadores de PDF de bancos
+   (minus sign, en dash, etc.) se normalizan a un guion común "-" */
+function normalizeDashes(line) {
+  return line.replace(/[\u2010\u2011\u2012\u2013\u2014\u2212]/g, "-");
+}
+
 function parseArsAmount(str) {
   const cleaned = str.replace(/\$/g, "").replace(/\s/g, "").trim();
   const negative = /^-/.test(cleaned) || /-$/.test(cleaned);
@@ -62,14 +68,20 @@ function parseArsAmount(str) {
  * (para inferir el año de las fechas dd/mm) y devuelve una lista de
  * gastos candidatos para revisar antes de importar.
  */
-export function parseStatementLines(lines, targetMonthKey) {
+export function parseStatementLines(rawLines, targetMonthKey) {
   const [targetYear, targetMonthNum] = targetMonthKey.split("-").map(Number);
+  const lines = rawLines.map(normalizeDashes);
   const results = [];
   const usedLines = new Set();
 
-  const AMOUNT_TAIL_RE = /(-?\$?\s?\d{1,3}(?:\.\d{3})*,\d{2})\s*-?\s*$/;
+  // Importe al final de línea: acepta $ opcional, miles con punto, centavos con coma,
+  // y un signo "-" opcional antes o después (créditos/descuentos).
+  const AMOUNT_TAIL_RE = /(-?\$?\s?\d{1,3}(?:\.\d{3})*,\d{2}\s*-?)\s*$/;
   const DATE_HEAD_RE = /^(\d{2})[\/\-.](\d{2})(?:[\/\-.](\d{2,4}))?\s+(.*)$/;
+  // Cuota al final de la descripción, con o sin prefijo "C.": "C.01/06", "01/06"
   const CUOTA_TAIL_RE = /(?:^|\s)(?:C\.?\s*)?(\d{1,2})\s*\/\s*(\d{1,2})\s*$/i;
+  // Número de comprobante suelto (sin barra) pegado justo antes del importe
+  const COMPROBANTE_TAIL_RE = /\s+(\d{3,8})\s*$/;
 
   lines.forEach((line, idx) => {
     const dateMatch = line.match(DATE_HEAD_RE);
@@ -81,23 +93,31 @@ export function parseStatementLines(lines, targetMonthKey) {
 
     const amountMatch = rest.match(AMOUNT_TAIL_RE);
     if (!amountMatch) return;
-    const amount = parseArsAmount(amountMatch[1]);
-    if (amount === null || amount === 0) return;
+    const rawAmount = parseArsAmount(amountMatch[1]);
+    if (rawAmount === null || rawAmount === 0) return;
 
-    let description = rest.slice(0, amountMatch.index).trim();
+    let rest2 = rest.slice(0, amountMatch.index).trim();
+
+    // Número de comprobante (si existe) justo antes del importe
+    const comprobMatch = rest2.match(COMPROBANTE_TAIL_RE);
+    if (comprobMatch) {
+      rest2 = rest2.slice(0, comprobMatch.index).trim();
+    }
+
+    // Cuota al final de lo que queda (después de sacar el comprobante)
     let cuotaActual = null;
     let cuotaTotal = null;
-    const cuotaMatch = description.match(CUOTA_TAIL_RE);
+    const cuotaMatch = rest2.match(CUOTA_TAIL_RE);
     if (cuotaMatch) {
-      cuotaActual = parseInt(cuotaMatch[1], 10);
-      cuotaTotal = parseInt(cuotaMatch[2], 10);
-      if (cuotaTotal >= cuotaActual && cuotaTotal <= 60) {
-        description = description.slice(0, cuotaMatch.index).trim();
-      } else {
-        cuotaActual = null; cuotaTotal = null;
+      const ca = parseInt(cuotaMatch[1], 10);
+      const ct = parseInt(cuotaMatch[2], 10);
+      if (ct >= ca && ct >= 1 && ct <= 60) {
+        cuotaActual = ca; cuotaTotal = ct;
+        rest2 = rest2.slice(0, cuotaMatch.index).trim();
       }
     }
-    description = description.replace(/\s{2,}/g, " ").trim();
+
+    const description = rest2.replace(/\$/g, "").replace(/[.\s]+$/, "").replace(/\s{2,}/g, " ").trim();
     if (!description) return;
 
     let year = yy ? (yy.length === 2 ? 2000 + parseInt(yy, 10) : parseInt(yy, 10)) : null;
@@ -108,37 +128,41 @@ export function parseStatementLines(lines, targetMonthKey) {
     const date = `${year}-${mm2}-${dd2}`;
 
     const possibleForeign = /U\$S|USD|D[OÓ]LAR/i.test(description);
+    const isCharge = TAX_KEYWORDS.test(description);
+    const isCredit = rawAmount < 0;
 
     usedLines.add(idx);
     results.push({
       rawDescription: description,
       date,
-      amount: Math.abs(amount),
+      amount: Math.abs(rawAmount),
       cuotaActual,
       cuotaTotal,
       possibleForeign,
-      isCharge: false,
+      isCharge,
+      isCredit,
     });
   });
 
-  // Segunda pasada: líneas de impuestos/cargos sin fecha al inicio
+  // Segunda pasada: líneas de impuestos/cargos que no tengan fecha al inicio
   lines.forEach((line, idx) => {
     if (usedLines.has(idx)) return;
     if (!TAX_KEYWORDS.test(line)) return;
     const amountMatch = line.match(AMOUNT_TAIL_RE);
     if (!amountMatch) return;
-    const amount = parseArsAmount(amountMatch[1]);
-    if (amount === null || amount === 0) return;
-    let description = line.slice(0, amountMatch.index).trim().replace(/\s{2,}/g, " ");
+    const rawAmount = parseArsAmount(amountMatch[1]);
+    if (rawAmount === null || rawAmount === 0) return;
+    let description = line.slice(0, amountMatch.index).trim().replace(/\$/g, "").replace(/\s{2,}/g, " ").trim();
     if (!description) return;
     results.push({
       rawDescription: description,
       date: `${targetYear}-${String(targetMonthNum).padStart(2, "0")}-01`,
-      amount: Math.abs(amount),
+      amount: Math.abs(rawAmount),
       cuotaActual: null,
       cuotaTotal: null,
       possibleForeign: false,
       isCharge: true,
+      isCredit: rawAmount < 0,
     });
   });
 

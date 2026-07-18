@@ -1723,6 +1723,11 @@ function ImportRow({ row, categories, familyMembers, onChange, onRemove }) {
         <input type="checkbox" checked={row.include} onChange={(e) => update({ include: e.target.checked })} />
         <span className="ect-import-row-orig" title={row.rawDescription}>Original: “{row.rawDescription}”</span>
         {row.isCharge && <span className="ect-badge gold">impuesto / cargo</span>}
+        {row.isCredit && (
+          <span className="ect-badge green" title="Detectamos un signo negativo en el importe original — probablemente un descuento o crédito, no un gasto. Revisá el monto antes de incluirlo.">
+            <AlertTriangle size={11} style={{ verticalAlign: "-2px", marginRight: 3 }} />posible crédito/descuento
+          </span>
+        )}
         {row.possibleForeign && (
           <span className="ect-badge blue" title="El texto original menciona dólares — revisá si el monto ya viene convertido a pesos">
             <AlertTriangle size={11} style={{ verticalAlign: "-2px", marginRight: 3 }} />posible USD
@@ -1830,7 +1835,7 @@ function ImportView({ data, onImportTx, onLearnMapping, lookupMapping }) {
         const mapping = lookupMapping(p.rawDescription);
         return {
           id: uid(),
-          include: true,
+          include: !p.isCredit,
           rawDescription: p.rawDescription,
           description: mapping?.description || cleanupDescription(p.rawDescription),
           date: p.date,
@@ -1845,6 +1850,7 @@ function ImportView({ data, onImportTx, onLearnMapping, lookupMapping }) {
           familyPersonId: mapping?.familyPersonId || familyMembers[0]?.id || "",
           possibleForeign: p.possibleForeign,
           isCharge: p.isCharge,
+          isCredit: p.isCredit,
         };
       });
       setRows(builtRows);

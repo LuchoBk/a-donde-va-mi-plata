@@ -6,7 +6,7 @@ import {
 import {
   LayoutDashboard, Receipt, Users, CreditCard, Tag, Plus, X, Pencil, Trash2,
   ChevronLeft, ChevronRight, Check, ArrowDownCircle, ArrowUpCircle, Layers,
-  CalendarClock, FileDown
+  CalendarClock, FileDown, UploadCloud, AlertTriangle, FileText, Loader2
 } from "lucide-react";
 import jsPDF from "jspdf";
 
@@ -69,6 +69,25 @@ function currentMonthKey() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
+/* Clave normalizada para el diccionario de descripciones aprendidas */
+function normDesc(s) {
+  return (s || "").trim().toUpperCase().replace(/\s+/g, " ");
+}
+
+/* Convierte "SUPERMERCADO COTO SA" en algo más legible por defecto */
+function cleanupDescription(raw) {
+  return (raw || "")
+    .toLowerCase()
+    .replace(/(^|\s)\S/g, (c) => c.toUpperCase())
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+function ensureCargosCategory(categories) {
+  if (categories.some((c) => c.id === "cargos")) return categories;
+  return [...categories, { id: "cargos", name: "Impuestos y cargos tarjeta", color: "#B5793E" }];
+}
+
 /* Conversión a ARS según la moneda original del gasto */
 function rateOf(tx) { return tx.currency === "USD" ? (Number(tx.exchangeRate) || 0) : 1; }
 function txTotalARS(tx) { return Math.round(tx.amount * rateOf(tx) * 100) / 100; }
@@ -127,6 +146,7 @@ const SEED_CATEGORIES = [
   { id: "suscripciones", name: "Suscripciones", color: "#5C8C9C" },
   { id: "compras", name: "Compras / Cuotas", color: "#9C8C5C" },
   { id: "otros", name: "Otros", color: "#9AA1B8" },
+  { id: "cargos", name: "Impuestos y cargos tarjeta", color: "#B5793E" },
 ];
 
 const SEED_FAMILY = [
@@ -143,6 +163,7 @@ const emptyData = () => ({
   transactions: [],
   repayments: [],
   sueldo: 2000000,
+  descriptionMappings: {},
 });
 
 /* ============================================================
@@ -560,9 +581,65 @@ const GlobalStyle = () => (
     .ect-person-name { font-family: 'Fraunces', serif; font-size: 16px; font-weight: 600; margin-bottom: 10px; }
     .ect-person-balance { font-family: 'IBM Plex Mono', monospace; font-size: 21px; font-weight: 600; }
 
+    .ect-dropzone {
+      border: 1.5px dashed var(--border);
+      border-radius: 10px;
+      padding: 46px 20px;
+      text-align: center;
+      color: var(--text-dim);
+      cursor: pointer;
+      transition: border-color .15s, background .15s;
+    }
+    .ect-dropzone:hover, .ect-dropzone.drag { border-color: var(--gold); background: var(--surface-2); color: var(--text); }
+    .ect-dropzone input { display: none; }
+
+    .ect-import-row {
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      padding: 12px 14px;
+      margin-bottom: 10px;
+      background: var(--surface-2);
+    }
+    .ect-import-row.excluded { opacity: 0.45; }
+    .ect-import-row-top {
+      display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap;
+    }
+    .ect-import-row-orig {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 11px;
+      color: var(--text-dim);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      max-width: 320px;
+    }
+    .ect-import-row-grid {
+      display: grid;
+      grid-template-columns: 1.6fr 1fr 0.7fr 0.9fr 1fr 1.3fr;
+      gap: 10px;
+      align-items: end;
+    }
+    .ect-import-row-grid label {
+      display: block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+      color: var(--text-dim); margin-bottom: 4px;
+    }
+    .ect-import-row-grid input, .ect-import-row-grid select {
+      width: 100%; background: var(--surface); border: 1px solid var(--border); color: var(--text);
+      padding: 7px 9px; border-radius: 6px; font-size: 12.5px; font-family: 'Inter', sans-serif;
+    }
+    .ect-import-summary-bar {
+      position: sticky; bottom: 0;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 18px;
+      display: flex; align-items: center; justify-content: space-between;
+      margin-top: 14px;
+    }
+
     ::-webkit-scrollbar { width: 9px; height: 9px; }
     ::-webkit-scrollbar-track { background: var(--bg); }
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
+    .ect-spin { animation: ect-spin-kf 0.9s linear infinite; }
+    @keyframes ect-spin-kf { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
   `}</style>
 );
 
@@ -1635,6 +1712,310 @@ function CategoriesView({ data, onAddCategory, onDeleteCategory }) {
 }
 
 /* ============================================================
+   IMPORT PDF VIEW
+   ============================================================ */
+
+function ImportRow({ row, categories, familyMembers, onChange, onRemove }) {
+  const update = (patch) => onChange({ ...row, ...patch });
+  return (
+    <div className={`ect-import-row ${row.include ? "" : "excluded"}`}>
+      <div className="ect-import-row-top">
+        <input type="checkbox" checked={row.include} onChange={(e) => update({ include: e.target.checked })} />
+        <span className="ect-import-row-orig" title={row.rawDescription}>Original: “{row.rawDescription}”</span>
+        {row.isCharge && <span className="ect-badge gold">impuesto / cargo</span>}
+        {row.possibleForeign && (
+          <span className="ect-badge blue" title="El texto original menciona dólares — revisá si el monto ya viene convertido a pesos">
+            <AlertTriangle size={11} style={{ verticalAlign: "-2px", marginRight: 3 }} />posible USD
+          </span>
+        )}
+        <button className="ect-icon-btn del" style={{ marginLeft: "auto" }} onClick={onRemove}><Trash2 size={13} /></button>
+      </div>
+      <div className="ect-import-row-grid">
+        <div>
+          <label>Descripción</label>
+          <input value={row.description} onChange={(e) => update({ description: e.target.value })} />
+        </div>
+        <div>
+          <label>Categoría</label>
+          <select value={row.categoryId} onChange={(e) => update({ categoryId: e.target.value })}>
+            {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </div>
+        <div>
+          <label>Fecha</label>
+          <input type="date" value={row.date} onChange={(e) => update({ date: e.target.value })} />
+        </div>
+        <div>
+          <label>Moneda / Monto</label>
+          <div style={{ display: "flex", gap: 4 }}>
+            <select style={{ width: 62 }} value={row.currency} onChange={(e) => update({ currency: e.target.value })}>
+              <option value="ARS">ARS</option>
+              <option value="USD">USD</option>
+            </select>
+            <input type="number" step="0.01" value={row.amount} onChange={(e) => update({ amount: e.target.value })} />
+          </div>
+          {row.currency === "USD" && (
+            <input
+              style={{ marginTop: 4 }}
+              type="number" step="0.01" placeholder="Tipo de cambio ARS/USD"
+              value={row.exchangeRate} onChange={(e) => update({ exchangeRate: e.target.value })}
+            />
+          )}
+        </div>
+        <div>
+          <label>Cuotas</label>
+          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+            <input type="checkbox" checked={row.enCuotas} onChange={(e) => update({ enCuotas: e.target.checked })} />
+            {row.enCuotas ? (
+              <>
+                <input type="number" min="1" style={{ width: 46 }} value={row.cuotaActual} onChange={(e) => update({ cuotaActual: e.target.value })} title="Cuota actual" />
+                <span style={{ color: "var(--text-dim)" }}>/</span>
+                <input type="number" min="2" style={{ width: 46 }} value={row.cuotasTotal} onChange={(e) => update({ cuotasTotal: e.target.value })} title="Cuotas totales" />
+              </>
+            ) : <span style={{ fontSize: 11.5, color: "var(--text-dim)" }}>contado</span>}
+          </div>
+        </div>
+        <div>
+          <label>Familiar</label>
+          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+            <input type="checkbox" checked={row.isFamily} onChange={(e) => update({ isFamily: e.target.checked })} />
+            {row.isFamily ? (
+              <select value={row.familyPersonId} onChange={(e) => update({ familyPersonId: e.target.value })}>
+                {familyMembers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            ) : <span style={{ fontSize: 11.5, color: "var(--text-dim)" }}>mío</span>}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ImportView({ data, onImportTx, onLearnMapping, lookupMapping }) {
+  const { cards, categories, familyMembers } = data;
+  const [step, setStep] = useState("select");
+  const [cardId, setCardId] = useState(cards[0]?.id || "");
+  const [monthKey, setMonthKey] = useState(currentMonthKey());
+  const [file, setFile] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [rows, setRows] = useState([]);
+  const [importedCount, setImportedCount] = useState(0);
+  const fileInputRef = useRef(null);
+
+  const handleFileSelected = (f) => {
+    if (!f) return;
+    if (f.type !== "application/pdf" && !f.name.toLowerCase().endsWith(".pdf")) {
+      setError("El archivo tiene que ser un PDF.");
+      return;
+    }
+    setError(null);
+    setFile(f);
+  };
+
+  const handleProcess = async () => {
+    if (!file || !cardId) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const { extractLinesFromPdf, parseStatementLines } = await import("./lib/pdfImport.js");
+      const lines = await extractLinesFromPdf(file);
+      const parsed = parseStatementLines(lines, monthKey);
+      if (parsed.length === 0) {
+        setError("No pude detectar gastos en este PDF. Puede que el formato de esta tarjeta no sea compatible, o que el PDF sea una imagen escaneada sin texto seleccionable (probá abrirlo y ver si podés seleccionar el texto con el mouse).");
+        setLoading(false);
+        return;
+      }
+      const builtRows = parsed.map((p) => {
+        const mapping = lookupMapping(p.rawDescription);
+        return {
+          id: uid(),
+          include: true,
+          rawDescription: p.rawDescription,
+          description: mapping?.description || cleanupDescription(p.rawDescription),
+          date: p.date,
+          categoryId: mapping?.categoryId || (p.isCharge ? "cargos" : (categories[0]?.id || "otros")),
+          currency: "ARS",
+          amount: p.amount,
+          exchangeRate: "",
+          enCuotas: !!(p.cuotaActual && p.cuotaTotal && p.cuotaTotal > 1),
+          cuotasTotal: p.cuotaTotal || 1,
+          cuotaActual: p.cuotaActual || 1,
+          isFamily: mapping?.isFamily || false,
+          familyPersonId: mapping?.familyPersonId || familyMembers[0]?.id || "",
+          possibleForeign: p.possibleForeign,
+          isCharge: p.isCharge,
+        };
+      });
+      setRows(builtRows);
+      setStep("review");
+    } catch (e) {
+      console.error(e);
+      setError("Ocurrió un error leyendo el PDF. Verificá que sea un archivo válido y no esté dañado o protegido con contraseña.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const updateRow = (updated) => setRows((rs) => rs.map((r) => (r.id === updated.id ? updated : r)));
+  const removeRow = (id) => setRows((rs) => rs.filter((r) => r.id !== id));
+  const toggleAll = (value) => setRows((rs) => rs.map((r) => ({ ...r, include: value })));
+
+  const includedRows = rows.filter((r) => r.include);
+  const totalIncluded = includedRows.reduce((a, r) => a + (Number(r.amount) || 0) * (r.currency === "USD" ? (Number(r.exchangeRate) || 0) : 1), 0);
+
+  const handleConfirm = () => {
+    const card = cards.find((c) => c.id === cardId);
+    includedRows.forEach((r) => {
+      const N = r.enCuotas ? Math.max(1, Number(r.cuotasTotal)) : 1;
+      let startMonth;
+      if (r.enCuotas) {
+        const cA = Math.min(Math.max(1, Number(r.cuotaActual)), N);
+        startMonth = addMonthsToKey(monthKey, -(cA - 1));
+      } else if (r.isCharge) {
+        startMonth = monthKey;
+      } else {
+        startMonth = keyOf(computeStatementMonth(r.date, card ? card.closingDay : 1));
+      }
+      const amountNum = Number(r.amount) || 0;
+      const rate = r.currency === "USD" ? (Number(r.exchangeRate) || 0) : 1;
+      const finalDescription = r.description.trim() || r.rawDescription;
+      const tx = {
+        id: uid(),
+        description: finalDescription,
+        amount: amountNum,
+        currency: r.currency,
+        exchangeRate: r.currency === "USD" ? rate : undefined,
+        montoCuota: Math.round((amountNum / N) * 100) / 100,
+        date: r.date,
+        categoryId: r.categoryId,
+        cardId,
+        cuotas: N,
+        startMonth,
+        isFamily: r.isFamily,
+        familyPersonId: r.isFamily ? r.familyPersonId : null,
+      };
+      onImportTx(tx);
+      onLearnMapping(r.rawDescription, {
+        description: finalDescription,
+        categoryId: r.categoryId,
+        isFamily: r.isFamily,
+        familyPersonId: r.isFamily ? r.familyPersonId : null,
+      });
+    });
+    setImportedCount(includedRows.length);
+    setStep("done");
+  };
+
+  const resetAll = () => {
+    setStep("select"); setFile(null); setRows([]); setError(null); setImportedCount(0);
+  };
+
+  return (
+    <div>
+      <div className="ect-topbar">
+        <div className="ect-page-title">Importar resumen (PDF)</div>
+      </div>
+
+      {step === "select" && (
+        <div className="ect-panel" style={{ maxWidth: 620 }}>
+          <div className="ect-section-title">1. Elegí la tarjeta y el mes de resumen</div>
+          <div className="ect-form-2col" style={{ marginBottom: 18 }}>
+            <div className="ect-form-row">
+              <label>Tarjeta</label>
+              <select value={cardId} onChange={(e) => setCardId(e.target.value)}>
+                {cards.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </div>
+            <div className="ect-form-row">
+              <label>Mes de este resumen</label>
+              <input type="month" value={monthKey} onChange={(e) => setMonthKey(e.target.value)} />
+            </div>
+          </div>
+
+          <div className="ect-section-title">2. Subí el PDF del resumen</div>
+          <div
+            className="ect-dropzone"
+            onClick={() => fileInputRef.current?.click()}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => { e.preventDefault(); handleFileSelected(e.dataTransfer.files?.[0]); }}
+          >
+            <FileText size={26} style={{ marginBottom: 8 }} />
+            <div>{file ? file.name : "Arrastrá el PDF acá o hacé clic para elegirlo"}</div>
+            <input ref={fileInputRef} type="file" accept="application/pdf" onChange={(e) => handleFileSelected(e.target.files?.[0])} />
+          </div>
+
+          {error && (
+            <div className="ect-form-hint" style={{ color: "var(--red)", marginTop: 12 }}>
+              <AlertTriangle size={13} style={{ verticalAlign: "-2px", marginRight: 4 }} />{error}
+            </div>
+          )}
+
+          <div className="ect-modal-actions" style={{ marginTop: 20 }}>
+            <button className="ect-btn" disabled={!file || !cardId || loading} onClick={handleProcess}>
+              {loading ? <><Loader2 size={14} className="ect-spin" /> Leyendo PDF...</> : <><UploadCloud size={14} /> Procesar PDF</>}
+            </button>
+          </div>
+
+          <div className="ect-form-hint" style={{ marginTop: 16 }}>
+            La lectura es automática pero heurística: cada banco imprime su resumen distinto,
+            así que en el paso siguiente vas a poder revisar y corregir cada gasto antes de confirmarlo.
+            Funciona con PDFs con texto seleccionable (la gran mayoría de los resúmenes digitales);
+            no funciona con PDFs escaneados como imagen.
+          </div>
+        </div>
+      )}
+
+      {step === "review" && (
+        <div>
+          <div className="ect-filters" style={{ alignItems: "center" }}>
+            <span className="ect-badge gold" style={{ padding: "8px 14px", fontSize: 13 }}>
+              {rows.length} gasto(s) detectado(s) — {cards.find((c) => c.id === cardId)?.name} · {labelOfKey(monthKey)}
+            </span>
+            <button className="ect-btn ghost sm" onClick={() => toggleAll(true)}>Marcar todos</button>
+            <button className="ect-btn ghost sm" onClick={() => toggleAll(false)}>Desmarcar todos</button>
+            <button className="ect-btn ghost sm" style={{ marginLeft: "auto" }} onClick={resetAll}>Empezar de nuevo</button>
+          </div>
+
+          {rows.map((row) => (
+            <ImportRow
+              key={row.id}
+              row={row}
+              categories={categories}
+              familyMembers={familyMembers}
+              onChange={updateRow}
+              onRemove={() => removeRow(row.id)}
+            />
+          ))}
+
+          <div className="ect-import-summary-bar">
+            <div>
+              <div style={{ fontSize: 12, color: "var(--text-dim)" }}>{includedRows.length} de {rows.length} seleccionados para importar</div>
+              <div className="ect-kpi-value gold" style={{ fontSize: 19 }}>{fmt(totalIncluded)}</div>
+            </div>
+            <button className="ect-btn" disabled={includedRows.length === 0} onClick={handleConfirm}>
+              <Check size={14} /> Confirmar importación ({includedRows.length})
+            </button>
+          </div>
+        </div>
+      )}
+
+      {step === "done" && (
+        <div className="ect-panel" style={{ maxWidth: 520, textAlign: "center", padding: "40px 30px" }}>
+          <Check size={30} color="var(--green)" style={{ marginBottom: 10 }} />
+          <div className="ect-section-title" style={{ justifyContent: "center" }}>¡Listo!</div>
+          <div style={{ color: "var(--text-dim)", fontSize: 13.5, marginBottom: 20 }}>
+            Se importaron {importedCount} gasto(s) al resumen de {labelOfKey(monthKey)}.
+            Las descripciones que hayas cambiado ya quedaron aprendidas para la próxima vez.
+          </div>
+          <button className="ect-btn" onClick={resetAll}><UploadCloud size={14} /> Importar otro resumen</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
    APP ROOT
    ============================================================ */
 
@@ -1654,8 +2035,10 @@ export default function App() {
         const migrated = {
           ...emptyData(),
           ...parsed,
+          categories: ensureCargosCategory(parsed.categories || SEED_CATEGORIES),
           transactions: (parsed.transactions || []).map((tx) => migrateTransaction(tx, parsed.cards || SEED_CARDS)),
           sueldo: parsed.sueldo ?? 2000000,
+          descriptionMappings: parsed.descriptionMappings || {},
         };
         setData(migrated);
       } else {
@@ -1709,6 +2092,13 @@ export default function App() {
 
   const updateSalary = (val) => setData(d => ({ ...d, sueldo: val }));
 
+  const lookupMapping = (rawDescription) => data.descriptionMappings[normDesc(rawDescription)] || null;
+  const upsertMapping = (rawDescription, info) => {
+    const key = normDesc(rawDescription);
+    if (!key) return;
+    setData(d => ({ ...d, descriptionMappings: { ...d.descriptionMappings, [key]: info } }));
+  };
+
   const exportBackup = () => {
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -1730,8 +2120,10 @@ export default function App() {
           setData({
             ...emptyData(),
             ...parsed,
+            categories: ensureCargosCategory(parsed.categories || SEED_CATEGORIES),
             transactions: (parsed.transactions || []).map((tx) => migrateTransaction(tx, parsed.cards || SEED_CARDS)),
             sueldo: parsed.sueldo ?? 2000000,
+            descriptionMappings: parsed.descriptionMappings || {},
           });
           alert("Backup importado correctamente.");
         } else {
@@ -1748,6 +2140,7 @@ export default function App() {
   const NAV = [
     { id: "dashboard", label: "Panel general", icon: LayoutDashboard },
     { id: "gastos", label: "Gastos", icon: Receipt },
+    { id: "importar", label: "Importar PDF", icon: UploadCloud },
     { id: "familia", label: "Familia", icon: Users },
     { id: "tarjetas", label: "Tarjetas", icon: CreditCard },
     { id: "categorias", label: "Categorías", icon: Tag },
@@ -1787,6 +2180,9 @@ export default function App() {
             onAdd={addTx} onEdit={editTx} onDelete={deleteTx}
             onAddCategory={addCategory} onAddFamily={addFamily}
           />
+        )}
+        {tab === "importar" && (
+          <ImportView data={data} onImportTx={addTx} onLearnMapping={upsertMapping} lookupMapping={lookupMapping} />
         )}
         {tab === "familia" && (
           <FamilyView

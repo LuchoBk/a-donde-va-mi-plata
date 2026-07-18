@@ -5,9 +5,10 @@ import {
 } from "recharts";
 import {
   LayoutDashboard, Receipt, Users, CreditCard, Tag, Plus, X, Pencil, Trash2,
-  ChevronLeft, ChevronRight, Wallet, TrendingUp, TrendingDown, Check,
-  ArrowDownCircle, ArrowUpCircle, Layers, CalendarClock
+  ChevronLeft, ChevronRight, Check, ArrowDownCircle, ArrowUpCircle, Layers,
+  CalendarClock, FileDown
 } from "lucide-react";
+import jsPDF from "jspdf";
 
 /* ============================================================
    HELPERS
@@ -16,7 +17,10 @@ import {
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
 const fmt = (n) =>
-  new Intl.NumberFormat("es-AR", { style: "currency", currency: "ARS", maximumFractionDigits: 0 }).format(n || 0);
+  new Intl.NumberFormat("es-AR", { style: "currency", currency: "ARS", minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(n || 0);
+
+const fmtUSD = (n) =>
+  new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(n || 0);
 
 const fmtDate = (isoStr) => {
   if (!isoStr) return "";
@@ -57,23 +61,44 @@ function labelOfKey(key) {
 function shortLabelOfKey(key) {
   const [y, m] = key.split("-").map(Number);
   const d = new Date(y, m - 1, 1);
-  const s = d.toLocaleDateString("es-AR", { month: "short" });
-  return s.replace(".", "").charAt(0).toUpperCase() + s.replace(".", "").slice(1) + " " + String(y).slice(2);
+  const s = d.toLocaleDateString("es-AR", { month: "short" }).replace(".", "");
+  return s.charAt(0).toUpperCase() + s.slice(1) + " " + String(y).slice(2);
 }
 function currentMonthKey() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
-function getContribution(tx, card, targetKey) {
-  if (!card) return { active: false };
-  const first = keyOf(computeStatementMonth(tx.date, card.closingDay));
-  const idx = monthsBetweenKeys(first, targetKey);
+/* Conversión a ARS según la moneda original del gasto */
+function rateOf(tx) { return tx.currency === "USD" ? (Number(tx.exchangeRate) || 0) : 1; }
+function txTotalARS(tx) { return Math.round(tx.amount * rateOf(tx) * 100) / 100; }
+function txCuotaARS(tx) { return Math.round(tx.montoCuota * rateOf(tx) * 100) / 100; }
+
+/* Contribución de una transacción a un mes de resumen puntual (targetKey),
+   usando el startMonth ya calculado/guardado en la transacción */
+function getContribution(tx, targetKey) {
   const N = tx.cuotas || 1;
+  const idx = monthsBetweenKeys(tx.startMonth, targetKey);
   if (idx >= 0 && idx < N) {
-    return { active: true, cuotaNum: idx + 1, total: N, monto: tx.montoCuota, firstKey: first };
+    return { active: true, cuotaNum: idx + 1, total: N, monto: txCuotaARS(tx) };
   }
-  return { active: false, firstKey: first };
+  return { active: false };
+}
+
+/* Migra transacciones guardadas en formato viejo (sin moneda/startMonth) */
+function migrateTransaction(tx, cards) {
+  if (tx.amount !== undefined && tx.startMonth) return tx;
+  const amount = tx.amount ?? tx.montoTotal ?? 0;
+  const currency = tx.currency || "ARS";
+  const exchangeRate = tx.exchangeRate ?? (currency === "USD" ? 1 : undefined);
+  const cuotas = tx.cuotas || 1;
+  const montoCuota = tx.montoCuota ?? Math.round((amount / cuotas) * 100) / 100;
+  let startMonth = tx.startMonth;
+  if (!startMonth) {
+    const card = cards.find((c) => c.id === tx.cardId);
+    startMonth = keyOf(computeStatementMonth(tx.date, card ? card.closingDay : 1));
+  }
+  return { ...tx, amount, currency, exchangeRate, cuotas, montoCuota, startMonth };
 }
 
 /* ============================================================
@@ -117,6 +142,7 @@ const emptyData = () => ({
   familyMembers: SEED_FAMILY,
   transactions: [],
   repayments: [],
+  sueldo: 2000000,
 });
 
 /* ============================================================
@@ -150,7 +176,6 @@ const GlobalStyle = () => (
     .ect-mono { font-family: 'IBM Plex Mono', monospace; font-variant-numeric: tabular-nums; }
     .ect-display { font-family: 'Fraunces', serif; }
 
-    /* Sidebar */
     .ect-sidebar {
       width: 232px;
       flex-shrink: 0;
@@ -208,8 +233,8 @@ const GlobalStyle = () => (
       color: var(--text-dim);
       border-top: 1px dashed var(--border);
     }
+    .ect-sueldo-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 
-    /* Main */
     .ect-main {
       flex: 1;
       min-width: 0;
@@ -274,6 +299,7 @@ const GlobalStyle = () => (
       font-size: 13px;
       cursor: pointer;
       transition: filter .15s, transform .1s;
+      white-space: nowrap;
     }
     .ect-btn:hover { filter: brightness(1.08); }
     .ect-btn:active { transform: scale(0.98); }
@@ -290,8 +316,8 @@ const GlobalStyle = () => (
     }
     .ect-btn.danger { background: var(--red); color: #fff; }
     .ect-btn.sm { padding: 6px 11px; font-size: 12px; }
+    .ect-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-    /* Cards / KPI */
     .ect-grid { display: grid; gap: 18px; }
     .ect-kpis { grid-template-columns: repeat(4, 1fr); margin-bottom: 22px; }
     .ect-panel {
@@ -359,7 +385,6 @@ const GlobalStyle = () => (
       letter-spacing: 0.5px;
     }
 
-    /* Ledger rows (signature element) */
     .ect-ledger-row {
       display: flex;
       align-items: baseline;
@@ -397,6 +422,7 @@ const GlobalStyle = () => (
     }
     .ect-badge.gold { color: var(--gold); border-color: #4a3d20; }
     .ect-badge.blue { color: var(--blue); border-color: #263349; }
+    .ect-badge.green { color: var(--green); border-color: #24402c; }
 
     table.ect-table { width: 100%; border-collapse: collapse; font-size: 13px; }
     table.ect-table thead th {
@@ -428,6 +454,7 @@ const GlobalStyle = () => (
       align-items: center;
       justify-content: center;
       cursor: pointer;
+      flex-shrink: 0;
     }
     .ect-icon-btn:hover { color: var(--gold); border-color: var(--gold); }
     .ect-icon-btn.del:hover { color: var(--red); border-color: var(--red); }
@@ -441,7 +468,6 @@ const GlobalStyle = () => (
       border-radius: 8px;
     }
 
-    /* Filters */
     .ect-filters { display: flex; gap: 10px; margin-bottom: 18px; flex-wrap: wrap; }
     .ect-select, .ect-input {
       background: var(--surface-2);
@@ -454,7 +480,6 @@ const GlobalStyle = () => (
     }
     .ect-select:focus, .ect-input:focus { outline: 1px solid var(--gold); }
 
-    /* Modal */
     .ect-modal-overlay {
       position: fixed; inset: 0;
       background: rgba(6,8,14,0.7);
@@ -498,6 +523,8 @@ const GlobalStyle = () => (
     }
     .ect-form-row input:focus, .ect-form-row select:focus { outline: 1px solid var(--gold); }
     .ect-form-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .ect-form-3col { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+    .ect-form-hint { font-size: 11.5px; color: var(--text-dim); margin-top: 6px; }
     .ect-toggle-row {
       display: flex; align-items: center; justify-content: space-between;
       background: var(--surface-2);
@@ -532,15 +559,6 @@ const GlobalStyle = () => (
     .ect-person-card.active { border-color: var(--gold); }
     .ect-person-name { font-family: 'Fraunces', serif; font-size: 16px; font-weight: 600; margin-bottom: 10px; }
     .ect-person-balance { font-family: 'IBM Plex Mono', monospace; font-size: 21px; font-weight: 600; }
-
-    .ect-cardpill {
-      display: flex; align-items: center; gap: 8px;
-      padding: 12px 14px; border-radius: 8px;
-      background: var(--surface-2); border: 1px solid var(--border);
-      margin-bottom: 8px;
-    }
-    .ect-cardpill .name { flex: 1; font-size: 13.5px; font-weight: 500; }
-    .ect-cardpill .meta { font-size: 11px; color: var(--text-dim); }
 
     ::-webkit-scrollbar { width: 9px; height: 9px; }
     ::-webkit-scrollbar-track { background: var(--bg); }
@@ -584,18 +602,34 @@ function MonthNav({ monthKey, setMonthKey }) {
   );
 }
 
+function CurrencyTag({ tx }) {
+  if (tx.currency !== "USD") return null;
+  return <span className="ect-badge blue" title={`USD ${tx.amount.toFixed(2)} · TC ${tx.exchangeRate}`}>USD</span>;
+}
+
 /* ============================================================
    TRANSACTION FORM (gasto personal o familiar)
    ============================================================ */
 
-function TransactionForm({ initial, cards, categories, familyMembers, onSave, onClose, onAddCategory, onAddFamily }) {
+function TransactionForm({ initial, cards, categories, familyMembers, allTransactions, defaultMonthKey, onSave, onClose, onAddCategory, onAddFamily }) {
   const [description, setDescription] = useState(initial?.description || "");
-  const [montoTotal, setMontoTotal] = useState(initial?.montoTotal ?? "");
+  const [currency, setCurrency] = useState(initial?.currency || "ARS");
+  const [amount, setAmount] = useState(initial?.amount ?? "");
+  const [exchangeRate, setExchangeRate] = useState(initial?.exchangeRate ?? "");
   const [date, setDate] = useState(initial?.date || new Date().toISOString().slice(0, 10));
   const [categoryId, setCategoryId] = useState(initial?.categoryId || categories[0]?.id || "");
   const [cardId, setCardId] = useState(initial?.cardId || cards[0]?.id || "");
   const [enCuotas, setEnCuotas] = useState((initial?.cuotas || 1) > 1);
-  const [cuotas, setCuotas] = useState(initial?.cuotas || 3);
+  const [cuotasTotal, setCuotasTotal] = useState(initial?.cuotas && initial.cuotas > 1 ? initial.cuotas : 3);
+  const [mesResumen, setMesResumen] = useState(defaultMonthKey || currentMonthKey());
+  const [cuotaActual, setCuotaActual] = useState(() => {
+    if (initial?.cuotas > 1 && initial?.startMonth) {
+      const base = defaultMonthKey || currentMonthKey();
+      const idx = monthsBetweenKeys(initial.startMonth, base) + 1;
+      return Math.min(Math.max(1, idx), initial.cuotas);
+    }
+    return 1;
+  });
   const [esFamiliar, setEsFamiliar] = useState(!!initial?.isFamily);
   const [familyPersonId, setFamilyPersonId] = useState(initial?.familyPersonId || familyMembers[0]?.id || "");
   const [newCatName, setNewCatName] = useState("");
@@ -603,21 +637,56 @@ function TransactionForm({ initial, cards, categories, familyMembers, onSave, on
   const [showNewCat, setShowNewCat] = useState(false);
   const [showNewPerson, setShowNewPerson] = useState(false);
 
-  const montoCuotaPreview = enCuotas && montoTotal && cuotas ? Number(montoTotal) / Number(cuotas) : Number(montoTotal) || 0;
+  const uniqueDescriptions = useMemo(() => {
+    const seen = new Map();
+    [...allTransactions].sort((a, b) => new Date(b.date) - new Date(a.date)).forEach((t) => {
+      const key = t.description.trim().toLowerCase();
+      if (!seen.has(key)) seen.set(key, t);
+    });
+    return Array.from(seen.values());
+  }, [allTransactions]);
 
-  const canSave = description.trim() && Number(montoTotal) > 0 && date && categoryId && cardId && (!esFamiliar || familyPersonId);
+  const handleDescriptionChange = (val) => {
+    setDescription(val);
+    const match = uniqueDescriptions.find((t) => t.description.trim().toLowerCase() === val.trim().toLowerCase());
+    if (match) {
+      setCategoryId(match.categoryId);
+      setCardId(match.cardId);
+    }
+  };
+
+  const amountNum = Number(amount) || 0;
+  const rateNum = currency === "USD" ? (Number(exchangeRate) || 0) : 1;
+  const totalARS = Math.round(amountNum * rateNum * 100) / 100;
+  const cuotaOriginal = enCuotas && amountNum && cuotasTotal ? amountNum / Number(cuotasTotal) : amountNum;
+  const cuotaARS = Math.round(cuotaOriginal * rateNum * 100) / 100;
+
+  const cuotasValid = !enCuotas || (Number(cuotasTotal) >= 2 && Number(cuotaActual) >= 1 && Number(cuotaActual) <= Number(cuotasTotal));
+  const canSave = description.trim() && amountNum > 0 && date && categoryId && cardId &&
+    (!esFamiliar || familyPersonId) && (currency !== "USD" || rateNum > 0) && cuotasValid;
 
   const handleSave = () => {
-    const N = enCuotas ? Math.max(1, Number(cuotas)) : 1;
+    const N = enCuotas ? Math.max(1, Number(cuotasTotal)) : 1;
+    let startMonth;
+    if (enCuotas) {
+      const cA = Math.min(Math.max(1, Number(cuotaActual)), N);
+      startMonth = addMonthsToKey(mesResumen, -(cA - 1));
+    } else {
+      const card = cards.find((c) => c.id === cardId);
+      startMonth = keyOf(computeStatementMonth(date, card ? card.closingDay : 1));
+    }
     const tx = {
       id: initial?.id || uid(),
       description: description.trim(),
-      montoTotal: Number(montoTotal),
-      montoCuota: Math.round((Number(montoTotal) / N) * 100) / 100,
+      amount: amountNum,
+      currency,
+      exchangeRate: currency === "USD" ? rateNum : undefined,
+      montoCuota: Math.round((amountNum / N) * 100) / 100,
       date,
       categoryId,
       cardId,
       cuotas: N,
+      startMonth,
       isFamily: esFamiliar,
       familyPersonId: esFamiliar ? familyPersonId : null,
     };
@@ -628,17 +697,44 @@ function TransactionForm({ initial, cards, categories, familyMembers, onSave, on
     <Modal title={initial ? "Editar gasto" : "Nuevo gasto"} onClose={onClose}>
       <div className="ect-form-row">
         <label>Descripción</label>
-        <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Ej: Supermercado, Netflix, Zapatillas..." />
+        <input
+          list="ect-desc-suggestions"
+          value={description}
+          onChange={(e) => handleDescriptionChange(e.target.value)}
+          placeholder="Ej: Supermercado, Netflix, Zapatillas..."
+        />
+        <datalist id="ect-desc-suggestions">
+          {uniqueDescriptions.map((t) => <option key={t.id} value={t.description} />)}
+        </datalist>
       </div>
+
       <div className="ect-form-2col">
         <div className="ect-form-row">
-          <label>Monto total</label>
-          <input type="number" value={montoTotal} onChange={(e) => setMontoTotal(e.target.value)} placeholder="0" />
+          <label>Moneda</label>
+          <select value={currency} onChange={(e) => setCurrency(e.target.value)}>
+            <option value="ARS">Pesos (ARS)</option>
+            <option value="USD">Dólares (USD)</option>
+          </select>
         </div>
         <div className="ect-form-row">
-          <label>Fecha</label>
-          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+          <label>Monto {currency === "USD" ? "(USD)" : "(ARS)"}</label>
+          <input type="number" step="0.01" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" />
         </div>
+      </div>
+
+      {currency === "USD" && (
+        <div className="ect-form-row">
+          <label>Tipo de cambio (ARS por USD, al momento de la compra)</label>
+          <input type="number" step="0.01" min="0" value={exchangeRate} onChange={(e) => setExchangeRate(e.target.value)} placeholder="Ej: 1250.00" />
+          {amountNum > 0 && rateNum > 0 && (
+            <div className="ect-form-hint">Equivale a {fmt(totalARS)}</div>
+          )}
+        </div>
+      )}
+
+      <div className="ect-form-row">
+        <label>Fecha de la compra</label>
+        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
       </div>
 
       <div className="ect-form-row">
@@ -675,16 +771,25 @@ function TransactionForm({ initial, cards, categories, familyMembers, onSave, on
         <Switch on={enCuotas} onClick={() => setEnCuotas(!enCuotas)} />
       </div>
       {enCuotas && (
-        <div className="ect-form-2col">
-          <div className="ect-form-row">
-            <label>Cantidad de cuotas</label>
-            <input type="number" min="2" value={cuotas} onChange={(e) => setCuotas(e.target.value)} />
+        <>
+          <div className="ect-form-3col">
+            <div className="ect-form-row">
+              <label>Cuotas totales</label>
+              <input type="number" min="2" value={cuotasTotal} onChange={(e) => setCuotasTotal(e.target.value)} />
+            </div>
+            <div className="ect-form-row">
+              <label>Cuota actual</label>
+              <input type="number" min="1" max={cuotasTotal} value={cuotaActual} onChange={(e) => setCuotaActual(e.target.value)} />
+            </div>
+            <div className="ect-form-row">
+              <label>Mes de este resumen</label>
+              <input type="month" value={mesResumen} onChange={(e) => setMesResumen(e.target.value)} />
+            </div>
           </div>
-          <div className="ect-form-row">
-            <label>Monto por cuota (aprox.)</label>
-            <input className="ect-mono" disabled value={fmt(montoCuotaPreview)} />
+          <div className="ect-form-hint" style={{ marginTop: -8, marginBottom: 14 }}>
+            Cuota por período: {fmt(cuotaARS)}{currency === "USD" ? ` (USD ${cuotaOriginal.toFixed(2)})` : ""}
           </div>
-        </div>
+        </>
       )}
 
       <div className="ect-toggle-row">
@@ -717,7 +822,7 @@ function TransactionForm({ initial, cards, categories, familyMembers, onSave, on
 
       <div className="ect-modal-actions">
         <button className="ect-btn secondary" onClick={onClose}>Cancelar</button>
-        <button className="ect-btn" disabled={!canSave} style={!canSave ? { opacity: 0.5, cursor: "not-allowed" } : undefined} onClick={handleSave}>
+        <button className="ect-btn" disabled={!canSave} onClick={handleSave}>
           <Check size={14} /> Guardar
         </button>
       </div>
@@ -733,8 +838,8 @@ function RepaymentForm({ person, onSave, onClose }) {
     <Modal title={`Registrar devolución — ${person.name}`} onClose={onClose} width={420}>
       <div className="ect-form-2col">
         <div className="ect-form-row">
-          <label>Monto</label>
-          <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0" />
+          <label>Monto (ARS)</label>
+          <input type="number" step="0.01" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" />
         </div>
         <div className="ect-form-row">
           <label>Fecha</label>
@@ -750,9 +855,26 @@ function RepaymentForm({ person, onSave, onClose }) {
         <button
           className="ect-btn"
           disabled={!(Number(amount) > 0)}
-          style={!(Number(amount) > 0) ? { opacity: 0.5, cursor: "not-allowed" } : undefined}
-          onClick={() => onSave({ id: uid(), personId: person.id, amount: Number(amount), date, note })}
+          onClick={() => onSave({ id: uid(), personId: person.id, amount: Math.round(Number(amount) * 100) / 100, date, note })}
         >
+          <Check size={14} /> Guardar
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+function EditSalaryModal({ current, onSave, onClose }) {
+  const [value, setValue] = useState(current);
+  return (
+    <Modal title="Editar sueldo mensual" onClose={onClose} width={360}>
+      <div className="ect-form-row">
+        <label>Monto (ARS)</label>
+        <input type="number" step="0.01" min="0" value={value} onChange={(e) => setValue(e.target.value)} autoFocus />
+      </div>
+      <div className="ect-modal-actions">
+        <button className="ect-btn secondary" onClick={onClose}>Cancelar</button>
+        <button className="ect-btn" disabled={!(Number(value) > 0)} onClick={() => onSave(Number(value))}>
           <Check size={14} /> Guardar
         </button>
       </div>
@@ -770,7 +892,7 @@ function Dashboard({ data, monthKey, setMonthKey }) {
   const cardTotals = useMemo(() => cards.map((card) => {
     let total = 0;
     transactions.filter(t => t.cardId === card.id).forEach(tx => {
-      const c = getContribution(tx, card, monthKey);
+      const c = getContribution(tx, monthKey);
       if (c.active) total += c.monto;
     });
     return { card, total };
@@ -781,12 +903,11 @@ function Dashboard({ data, monthKey, setMonthKey }) {
   const totalFamiliar = useMemo(() => {
     let t = 0;
     transactions.filter(tx => tx.isFamily).forEach(tx => {
-      const card = cards.find(c => c.id === tx.cardId);
-      const c = getContribution(tx, card, monthKey);
+      const c = getContribution(tx, monthKey);
       if (c.active) t += c.monto;
     });
     return t;
-  }, [transactions, cards, monthKey]);
+  }, [transactions, monthKey]);
 
   const totalPersonal = totalGeneral - totalFamiliar;
 
@@ -794,24 +915,22 @@ function Dashboard({ data, monthKey, setMonthKey }) {
   const prevPersonal = useMemo(() => {
     let t = 0;
     transactions.filter(tx => !tx.isFamily).forEach(tx => {
-      const card = cards.find(c => c.id === tx.cardId);
-      const c = getContribution(tx, card, prevMonthKey);
+      const c = getContribution(tx, prevMonthKey);
       if (c.active) t += c.monto;
     });
     return t;
-  }, [transactions, cards, prevMonthKey]);
+  }, [transactions, prevMonthKey]);
 
   const delta = prevPersonal > 0 ? ((totalPersonal - prevPersonal) / prevPersonal) * 100 : null;
 
   const categoryTotals = useMemo(() => {
     const map = {};
     transactions.filter(tx => !tx.isFamily).forEach(tx => {
-      const card = cards.find(c => c.id === tx.cardId);
-      const c = getContribution(tx, card, monthKey);
+      const c = getContribution(tx, monthKey);
       if (c.active) map[tx.categoryId] = (map[tx.categoryId] || 0) + c.monto;
     });
     return categories.map(cat => ({ name: cat.name, value: map[cat.id] || 0, color: cat.color })).filter(x => x.value > 0);
-  }, [transactions, cards, categories, monthKey]);
+  }, [transactions, categories, monthKey]);
 
   const trend = useMemo(() => {
     const out = [];
@@ -819,14 +938,13 @@ function Dashboard({ data, monthKey, setMonthKey }) {
       const k = addMonthsToKey(monthKey, -i);
       let personal = 0, familiar = 0;
       transactions.forEach(tx => {
-        const card = cards.find(c => c.id === tx.cardId);
-        const c = getContribution(tx, card, k);
+        const c = getContribution(tx, k);
         if (c.active) { if (tx.isFamily) familiar += c.monto; else personal += c.monto; }
       });
       out.push({ month: shortLabelOfKey(k), Personal: Math.round(personal), Familiar: Math.round(familiar) });
     }
     return out;
-  }, [transactions, cards, monthKey]);
+  }, [transactions, monthKey]);
 
   const futureCommitted = useMemo(() => {
     const out = [];
@@ -834,19 +952,18 @@ function Dashboard({ data, monthKey, setMonthKey }) {
       const k = addMonthsToKey(monthKey, i);
       let total = 0;
       transactions.filter(tx => (tx.cuotas || 1) > 1).forEach(tx => {
-        const card = cards.find(c => c.id === tx.cardId);
-        const c = getContribution(tx, card, k);
+        const c = getContribution(tx, k);
         if (c.active) total += c.monto;
       });
       out.push({ month: shortLabelOfKey(k), total: Math.round(total) });
     }
     return out;
-  }, [transactions, cards, monthKey]);
+  }, [transactions, monthKey]);
 
   const activeInstallments = useMemo(() => {
     return transactions.filter(tx => (tx.cuotas || 1) > 1).map(tx => {
       const card = cards.find(c => c.id === tx.cardId);
-      const c = getContribution(tx, card, monthKey);
+      const c = getContribution(tx, monthKey);
       return { tx, card, c };
     }).filter(x => x.c.active);
   }, [transactions, cards, monthKey]);
@@ -868,8 +985,7 @@ function Dashboard({ data, monthKey, setMonthKey }) {
           <div className="ect-kpi-value">{fmt(totalPersonal)}</div>
           {delta !== null && (
             <div className={`ect-kpi-delta ${delta >= 0 ? "up" : "down"}`}>
-              {delta >= 0 ? <TrendingUp /> : <TrendingDown />}
-              {Math.abs(delta).toFixed(1)}% vs. mes anterior
+              {delta >= 0 ? "▲" : "▼"} {Math.abs(delta).toFixed(1)}% vs. mes anterior
             </div>
           )}
         </div>
@@ -891,10 +1007,7 @@ function Dashboard({ data, monthKey, setMonthKey }) {
               <CartesianGrid strokeDasharray="3 3" stroke="#2A3250" vertical={false} />
               <XAxis dataKey="month" tick={{ fill: "#9AA1B8", fontSize: 11 }} axisLine={{ stroke: "#2A3250" }} tickLine={false} />
               <YAxis tick={{ fill: "#9AA1B8", fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`} />
-              <Tooltip
-                contentStyle={{ background: "#1D2438", border: "1px solid #2A3250", borderRadius: 8, fontSize: 12 }}
-                formatter={(v) => fmt(v)}
-              />
+              <Tooltip contentStyle={{ background: "#1D2438", border: "1px solid #2A3250", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmt(v)} />
               <Legend wrapperStyle={{ fontSize: 12 }} />
               <Bar dataKey="Personal" stackId="a" fill="#C9A15D" radius={[0, 0, 0, 0]} />
               <Bar dataKey="Familiar" stackId="a" fill="#BD5C48" radius={[4, 4, 0, 0]} />
@@ -960,7 +1073,7 @@ function Dashboard({ data, monthKey, setMonthKey }) {
             <tbody>
               {activeInstallments.map(({ tx, card, c }) => (
                 <tr key={tx.id}>
-                  <td>{tx.description}{tx.isFamily && <span className="ect-badge blue" style={{ marginLeft: 8 }}>familiar</span>}</td>
+                  <td>{tx.description} <CurrencyTag tx={tx} /> {tx.isFamily && <span className="ect-badge blue" style={{ marginLeft: 6 }}>familiar</span>}</td>
                   <td><span className="ect-dot" style={{ background: card.color, marginRight: 6 }} />{card.name}</td>
                   <td><span className="ect-badge gold">{c.cuotaNum}/{c.total}</span></td>
                   <td className="amt">{fmt(c.monto)}</td>
@@ -990,7 +1103,7 @@ function ExpensesView({ data, monthKey, setMonthKey, onAdd, onEdit, onDelete, on
     return transactions.map(tx => {
       const card = cards.find(c => c.id === tx.cardId);
       const cat = categories.find(c => c.id === tx.categoryId);
-      const c = getContribution(tx, card, monthKey);
+      const c = getContribution(tx, monthKey);
       return { tx, card, cat, c };
     }).filter(r => r.c.active)
       .filter(r => filterCard === "all" || r.tx.cardId === filterCard)
@@ -1045,7 +1158,7 @@ function ExpensesView({ data, monthKey, setMonthKey, onAdd, onEdit, onDelete, on
               {rows.map(({ tx, card, cat, c }) => (
                 <tr key={tx.id}>
                   <td className="ect-mono" style={{ color: "var(--text-dim)" }}>{fmtDate(tx.date)}</td>
-                  <td>{tx.description} {tx.isFamily && <span className="ect-badge blue" style={{ marginLeft: 6 }}>
+                  <td>{tx.description} <CurrencyTag tx={tx} /> {tx.isFamily && <span className="ect-badge blue" style={{ marginLeft: 6 }}>
                     {familyMembers.find(f => f.id === tx.familyPersonId)?.name || "familiar"}
                   </span>}</td>
                   <td><span className="ect-dot" style={{ background: card?.color, marginRight: 6 }} />{card?.name}</td>
@@ -1071,6 +1184,8 @@ function ExpensesView({ data, monthKey, setMonthKey, onAdd, onEdit, onDelete, on
           cards={cards}
           categories={categories}
           familyMembers={familyMembers}
+          allTransactions={transactions}
+          defaultMonthKey={monthKey}
           onAddCategory={onAddCategory}
           onAddFamily={onAddFamily}
           onClose={() => setShowForm(false)}
@@ -1085,7 +1200,114 @@ function ExpensesView({ data, monthKey, setMonthKey, onAdd, onEdit, onDelete, on
    FAMILY VIEW
    ============================================================ */
 
-function FamilyView({ data, onAddRepayment, onDeleteRepayment, onAddFamily, onDeleteTx, onAddTx, onAddCategory }) {
+function generateFamilyPDF(person, gastos, devs, balance) {
+  const doc = new jsPDF();
+  const marginX = 14;
+  const rightX = 196;
+  let y = 20;
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(16);
+  doc.text(`Reporte de gastos — ${person.name}`, marginX, y);
+  y += 7;
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9);
+  doc.setTextColor(120);
+  doc.text(`Generado el ${new Date().toLocaleDateString("es-AR")}`, marginX, y);
+  doc.setTextColor(0);
+  y += 12;
+
+  const ensureSpace = (needed) => {
+    if (y + needed > 285) { doc.addPage(); y = 20; }
+  };
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(12);
+  doc.text("Gastos", marginX, y);
+  y += 7;
+  doc.setFontSize(9);
+  doc.setTextColor(120);
+  doc.text("Fecha", marginX, y);
+  doc.text("Descripción", marginX + 24, y);
+  doc.text("Cuotas", marginX + 128, y);
+  doc.text("Monto", rightX, y, { align: "right" });
+  doc.setTextColor(0);
+  y += 2;
+  doc.setDrawColor(200);
+  doc.line(marginX, y, rightX, y);
+  y += 6;
+  doc.setFont("helvetica", "normal");
+
+  const sortedGastos = [...gastos].sort((a, b) => new Date(a.date) - new Date(b.date));
+  if (sortedGastos.length === 0) {
+    doc.setTextColor(140);
+    doc.text("Sin gastos cargados.", marginX, y);
+    doc.setTextColor(0);
+    y += 8;
+  }
+  sortedGastos.forEach((tx) => {
+    ensureSpace(8);
+    doc.text(fmtDate(tx.date), marginX, y);
+    const desc = tx.description.length > 48 ? tx.description.slice(0, 48) + "…" : tx.description;
+    doc.text(desc + (tx.currency === "USD" ? ` (USD ${tx.amount.toFixed(2)})` : ""), marginX + 24, y);
+    doc.text(tx.cuotas > 1 ? `${tx.cuotas} cuotas` : "contado", marginX + 128, y);
+    doc.text(fmt(txTotalARS(tx)), rightX, y, { align: "right" });
+    y += 6;
+  });
+
+  y += 3;
+  ensureSpace(10);
+  doc.setDrawColor(200);
+  doc.line(marginX, y, rightX, y);
+  y += 6;
+  doc.setFont("helvetica", "bold");
+  doc.text(`Total gastos: ${fmt(gastos.reduce((a, tx) => a + txTotalARS(tx), 0))}`, marginX, y);
+  y += 14;
+
+  ensureSpace(20);
+  doc.setFontSize(12);
+  doc.text("Devoluciones", marginX, y);
+  y += 7;
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9);
+  doc.setTextColor(120);
+  doc.text("Fecha", marginX, y);
+  doc.text("Nota", marginX + 24, y);
+  doc.text("Monto", rightX, y, { align: "right" });
+  doc.setTextColor(0);
+  y += 2;
+  doc.setDrawColor(200);
+  doc.line(marginX, y, rightX, y);
+  y += 6;
+
+  const sortedDevs = [...devs].sort((a, b) => new Date(a.date) - new Date(b.date));
+  if (sortedDevs.length === 0) {
+    doc.setTextColor(140);
+    doc.text("Sin devoluciones registradas.", marginX, y);
+    doc.setTextColor(0);
+    y += 8;
+  }
+  sortedDevs.forEach((r) => {
+    ensureSpace(8);
+    doc.text(fmtDate(r.date), marginX, y);
+    doc.text(r.note || "-", marginX + 24, y);
+    doc.text(fmt(r.amount), rightX, y, { align: "right" });
+    y += 6;
+  });
+
+  y += 3;
+  ensureSpace(14);
+  doc.setDrawColor(200);
+  doc.line(marginX, y, rightX, y);
+  y += 8;
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(12);
+  doc.text(`Saldo pendiente: ${fmt(balance)}`, marginX, y);
+
+  doc.save(`gastos-${person.name.replace(/\s+/g, "_").toLowerCase()}-${new Date().toISOString().slice(0, 10)}.pdf`);
+}
+
+function FamilyView({ data, monthKey, onAddRepayment, onDeleteRepayment, onAddFamily, onDeleteTx, onAddTx, onAddCategory }) {
   const { familyMembers, transactions, repayments, cards, categories } = data;
   const [selected, setSelected] = useState(familyMembers[0]?.id || null);
   const [showRepay, setShowRepay] = useState(false);
@@ -1095,7 +1317,7 @@ function FamilyView({ data, onAddRepayment, onDeleteRepayment, onAddFamily, onDe
 
   const balances = useMemo(() => familyMembers.map(p => {
     const gastos = transactions.filter(tx => tx.isFamily && tx.familyPersonId === p.id);
-    const totalGastos = gastos.reduce((a, tx) => a + tx.montoTotal, 0);
+    const totalGastos = gastos.reduce((a, tx) => a + txTotalARS(tx), 0);
     const devs = repayments.filter(r => r.personId === p.id);
     const totalDevs = devs.reduce((a, r) => a + r.amount, 0);
     return { person: p, gastos, devs, totalGastos, totalDevs, balance: totalGastos - totalDevs };
@@ -1139,6 +1361,9 @@ function FamilyView({ data, onAddRepayment, onDeleteRepayment, onAddFamily, onDe
           <div className="ect-topbar" style={{ marginTop: 6 }}>
             <div className="ect-section-title" style={{ margin: 0 }}>{current.person.name} — detalle</div>
             <div style={{ display: "flex", gap: 10 }}>
+              <button className="ect-btn secondary" onClick={() => generateFamilyPDF(current.person, current.gastos, current.devs, current.balance)}>
+                <FileDown size={14} /> Descargar PDF
+              </button>
               <button className="ect-btn secondary" onClick={() => setShowNewTx(true)}><Plus size={14} /> Nuevo gasto</button>
               <button className="ect-btn" onClick={() => setShowRepay(true)}><ArrowDownCircle size={14} /> Registrar devolución</button>
             </div>
@@ -1155,10 +1380,11 @@ function FamilyView({ data, onAddRepayment, onDeleteRepayment, onAddFamily, onDe
                       <div className="ect-ledger-row" key={tx.id}>
                         <span className="ect-dot" style={{ background: card?.color }} />
                         <span className="ect-ledger-desc">{tx.description}</span>
+                        <CurrencyTag tx={tx} />
                         {tx.cuotas > 1 && <span className="ect-badge gold">{tx.cuotas} cuotas</span>}
                         <span className="ect-ledger-meta">{fmtDate(tx.date)}</span>
                         <span className="ect-ledger-dots" />
-                        <span className="ect-ledger-amt">{fmt(tx.montoTotal)}</span>
+                        <span className="ect-ledger-amt">{fmt(txTotalARS(tx))}</span>
                         <button className="ect-icon-btn del" onClick={() => onDeleteTx(tx.id)}><Trash2 size={12} /></button>
                       </div>
                     );
@@ -1198,6 +1424,8 @@ function FamilyView({ data, onAddRepayment, onDeleteRepayment, onAddFamily, onDe
           cards={cards}
           categories={categories}
           familyMembers={familyMembers}
+          allTransactions={transactions}
+          defaultMonthKey={monthKey}
           onAddCategory={onAddCategory}
           onAddFamily={onAddFamily}
           onClose={() => setShowNewTx(false)}
@@ -1250,7 +1478,7 @@ function CardsView({ data, monthKey, setMonthKey, onUpdateCard, onAddCard, onDel
 
       <div className="ect-grid" style={{ gridTemplateColumns: "repeat(2, 1fr)" }}>
         {cards.map(card => {
-          const txs = transactions.filter(t => t.cardId === card.id).map(tx => ({ tx, c: getContribution(tx, card, monthKey) })).filter(x => x.c.active);
+          const txs = transactions.filter(t => t.cardId === card.id).map(tx => ({ tx, c: getContribution(tx, monthKey) })).filter(x => x.c.active);
           const total = txs.reduce((a, x) => a + x.c.monto, 0);
           return (
             <div className="ect-panel" key={card.id}>
@@ -1277,6 +1505,7 @@ function CardsView({ data, monthKey, setMonthKey, onUpdateCard, onAddCard, onDel
                   {txs.sort((a, b) => new Date(b.tx.date) - new Date(a.tx.date)).slice(0, 6).map(({ tx, c }) => (
                     <div className="ect-ledger-row" key={tx.id}>
                       <span className="ect-ledger-desc">{tx.description}</span>
+                      <CurrencyTag tx={tx} />
                       {tx.cuotas > 1 && <span className="ect-badge gold">{c.cuotaNum}/{c.total}</span>}
                       <span className="ect-ledger-dots" />
                       <span className="ect-ledger-amt">{fmt(c.monto)}</span>
@@ -1346,7 +1575,6 @@ function CardForm({ initial, onSave, onClose }) {
         <button
           className="ect-btn"
           disabled={!name.trim()}
-          style={!name.trim() ? { opacity: 0.5, cursor: "not-allowed" } : undefined}
           onClick={() => onSave({ id: initial?.id || uid(), name: name.trim(), type, owner, closingDay: Number(closingDay), color })}
         >
           <Check size={14} /> Guardar
@@ -1360,7 +1588,7 @@ function CardForm({ initial, onSave, onClose }) {
    CATEGORIES VIEW
    ============================================================ */
 
-function CategoriesView({ data, onAddCategory, onDeleteCategory, onUpdateCategory }) {
+function CategoriesView({ data, onAddCategory, onDeleteCategory }) {
   const { categories, transactions } = data;
   const [newName, setNewName] = useState("");
   const [newColor, setNewColor] = useState("#C9A15D");
@@ -1414,13 +1642,25 @@ export default function App() {
   const [data, setData] = useState(null);
   const [tab, setTab] = useState("dashboard");
   const [monthKey, setMonthKey] = useState(currentMonthKey());
+  const [showSalaryModal, setShowSalaryModal] = useState(false);
   const saveTimer = useRef(null);
   const importInputRef = useRef(null);
 
   useEffect(() => {
     try {
       const raw = localStorage.getItem("expense-tracker-data");
-      setData(raw ? JSON.parse(raw) : emptyData());
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        const migrated = {
+          ...emptyData(),
+          ...parsed,
+          transactions: (parsed.transactions || []).map((tx) => migrateTransaction(tx, parsed.cards || SEED_CARDS)),
+          sueldo: parsed.sueldo ?? 2000000,
+        };
+        setData(migrated);
+      } else {
+        setData(emptyData());
+      }
     } catch (e) {
       setData(emptyData());
     }
@@ -1467,6 +1707,8 @@ export default function App() {
   const addCard = (card) => setData(d => ({ ...d, cards: [...d.cards, card] }));
   const deleteCard = (id) => setData(d => ({ ...d, cards: d.cards.filter(c => c.id !== id) }));
 
+  const updateSalary = (val) => setData(d => ({ ...d, sueldo: val }));
+
   const exportBackup = () => {
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -1485,7 +1727,12 @@ export default function App() {
       try {
         const parsed = JSON.parse(reader.result);
         if (parsed && parsed.cards && parsed.transactions) {
-          setData(parsed);
+          setData({
+            ...emptyData(),
+            ...parsed,
+            transactions: (parsed.transactions || []).map((tx) => migrateTransaction(tx, parsed.cards || SEED_CARDS)),
+            sueldo: parsed.sueldo ?? 2000000,
+          });
           alert("Backup importado correctamente.");
         } else {
           alert("El archivo no tiene el formato esperado.");
@@ -1518,7 +1765,12 @@ export default function App() {
           </div>
         ))}
         <div className="ect-sidebar-foot">
-          Sueldo estimado<br /><span className="ect-mono" style={{ color: "var(--text)" }}>{fmt(2000000)}</span> / mes
+          <div className="ect-sueldo-row">
+            <div>
+              Sueldo estimado<br /><span className="ect-mono" style={{ color: "var(--text)" }}>{fmt(data.sueldo)}</span> / mes
+            </div>
+            <button className="ect-icon-btn" onClick={() => setShowSalaryModal(true)}><Pencil size={12} /></button>
+          </div>
           <div style={{ display: "flex", gap: 6, marginTop: 12 }}>
             <button className="ect-btn ghost sm" style={{ flex: 1 }} onClick={exportBackup}>Exportar</button>
             <button className="ect-btn ghost sm" style={{ flex: 1 }} onClick={() => importInputRef.current?.click()}>Importar</button>
@@ -1538,7 +1790,7 @@ export default function App() {
         )}
         {tab === "familia" && (
           <FamilyView
-            data={data}
+            data={data} monthKey={monthKey}
             onAddRepayment={addRepayment} onDeleteRepayment={deleteRepayment}
             onAddFamily={addFamily} onDeleteTx={deleteTx} onAddTx={addTx}
             onAddCategory={addCategory}
@@ -1554,6 +1806,14 @@ export default function App() {
           <CategoriesView data={data} onAddCategory={addCategory} onDeleteCategory={deleteCategory} />
         )}
       </div>
+
+      {showSalaryModal && (
+        <EditSalaryModal
+          current={data.sueldo}
+          onClose={() => setShowSalaryModal(false)}
+          onSave={(val) => { updateSalary(val); setShowSalaryModal(false); }}
+        />
+      )}
     </div>
   );
 }

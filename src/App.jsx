@@ -88,6 +88,21 @@ function ensureCargosCategory(categories) {
   return [...categories, { id: "cargos", name: "Impuestos y cargos tarjeta", color: "#B5793E" }];
 }
 
+/* Sugiere a qué tarjeta del usuario corresponde una sub-cuenta detectada
+   en el PDF (ej. Naranja X combina "NX Virtual" y "NX Master" en un mismo
+   resumen, que en la app son tarjetas separadas) */
+function guessCardForSubAccount(subAccount, cards, fallbackCardId) {
+  if (!subAccount) return fallbackCardId;
+  const s = subAccount.toUpperCase();
+  if (s.includes("MASTER")) {
+    const m = cards.find((c) => /master/i.test(c.name));
+    if (m) return m.id;
+  }
+  const n = cards.find((c) => /naranja/i.test(c.name) && !/master/i.test(c.name));
+  if (n) return n.id;
+  return fallbackCardId;
+}
+
 /* Conversión a ARS según la moneda original del gasto */
 function rateOf(tx) { return tx.currency === "USD" ? (Number(tx.exchangeRate) || 0) : 1; }
 function txTotalARS(tx) { return Math.round(tx.amount * rateOf(tx) * 100) / 100; }
@@ -613,7 +628,7 @@ const GlobalStyle = () => (
     }
     .ect-import-row-grid {
       display: grid;
-      grid-template-columns: 1.6fr 1fr 0.7fr 0.9fr 1fr 1.3fr;
+      grid-template-columns: 1.3fr 1fr 1fr 0.75fr 0.9fr 1fr 1.15fr;
       gap: 10px;
       align-items: end;
     }
@@ -1715,13 +1730,14 @@ function CategoriesView({ data, onAddCategory, onDeleteCategory }) {
    IMPORT PDF VIEW
    ============================================================ */
 
-function ImportRow({ row, categories, familyMembers, onChange, onRemove }) {
+function ImportRow({ row, cards, categories, familyMembers, onChange, onRemove }) {
   const update = (patch) => onChange({ ...row, ...patch });
   return (
     <div className={`ect-import-row ${row.include ? "" : "excluded"}`}>
       <div className="ect-import-row-top">
         <input type="checkbox" checked={row.include} onChange={(e) => update({ include: e.target.checked })} />
         <span className="ect-import-row-orig" title={row.rawDescription}>Original: “{row.rawDescription}”</span>
+        {row.subAccount && <span className="ect-badge">{row.subAccount}</span>}
         {row.isCharge && <span className="ect-badge gold">impuesto / cargo</span>}
         {row.isCredit && (
           <span className="ect-badge green" title="Detectamos un signo negativo en el importe original — probablemente un descuento o crédito, no un gasto. Revisá el monto antes de incluirlo.">
@@ -1733,12 +1749,23 @@ function ImportRow({ row, categories, familyMembers, onChange, onRemove }) {
             <AlertTriangle size={11} style={{ verticalAlign: "-2px", marginRight: 3 }} />posible USD
           </span>
         )}
+        {row.needsReview && (
+          <span className="ect-badge green" title="Parece una cancelación anticipada de cuotas de una compra ya cargada antes, no un gasto nuevo. Revisá antes de incluirlo.">
+            <AlertTriangle size={11} style={{ verticalAlign: "-2px", marginRight: 3 }} />revisar: cancelación de cuotas
+          </span>
+        )}
         <button className="ect-icon-btn del" style={{ marginLeft: "auto" }} onClick={onRemove}><Trash2 size={13} /></button>
       </div>
       <div className="ect-import-row-grid">
         <div>
           <label>Descripción</label>
           <input value={row.description} onChange={(e) => update({ description: e.target.value })} />
+        </div>
+        <div>
+          <label>Tarjeta</label>
+          <select value={row.cardId} onChange={(e) => update({ cardId: e.target.value })}>
+            {cards.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
         </div>
         <div>
           <label>Categoría</label>
@@ -1806,6 +1833,7 @@ function ImportView({ data, onImportTx, onLearnMapping, lookupMapping }) {
   const [error, setError] = useState(null);
   const [rows, setRows] = useState([]);
   const [importedCount, setImportedCount] = useState(0);
+  const [skippedCount, setSkippedCount] = useState(0);
   const fileInputRef = useRef(null);
 
   const handleFileSelected = (f) => {
@@ -1835,12 +1863,13 @@ function ImportView({ data, onImportTx, onLearnMapping, lookupMapping }) {
         const mapping = lookupMapping(p.rawDescription);
         return {
           id: uid(),
-          include: !p.isCredit,
+          include: !p.isCredit && !p.needsReview,
           rawDescription: p.rawDescription,
           description: mapping?.description || cleanupDescription(p.rawDescription),
           date: p.date,
+          cardId: guessCardForSubAccount(p.subAccount, cards, cardId),
           categoryId: mapping?.categoryId || (p.isCharge ? "cargos" : (categories[0]?.id || "otros")),
-          currency: "ARS",
+          currency: p.currency || "ARS",
           amount: p.amount,
           exchangeRate: "",
           enCuotas: !!(p.cuotaActual && p.cuotaTotal && p.cuotaTotal > 1),
@@ -1851,6 +1880,8 @@ function ImportView({ data, onImportTx, onLearnMapping, lookupMapping }) {
           possibleForeign: p.possibleForeign,
           isCharge: p.isCharge,
           isCredit: p.isCredit,
+          needsReview: p.needsReview,
+          subAccount: p.subAccount,
         };
       });
       setRows(builtRows);
@@ -1871,8 +1902,10 @@ function ImportView({ data, onImportTx, onLearnMapping, lookupMapping }) {
   const totalIncluded = includedRows.reduce((a, r) => a + (Number(r.amount) || 0) * (r.currency === "USD" ? (Number(r.exchangeRate) || 0) : 1), 0);
 
   const handleConfirm = () => {
-    const card = cards.find((c) => c.id === cardId);
+    let imported = 0;
+    let skipped = 0;
     includedRows.forEach((r) => {
+      const card = cards.find((c) => c.id === r.cardId);
       const N = r.enCuotas ? Math.max(1, Number(r.cuotasTotal)) : 1;
       let startMonth;
       if (r.enCuotas) {
@@ -1883,19 +1916,34 @@ function ImportView({ data, onImportTx, onLearnMapping, lookupMapping }) {
       } else {
         startMonth = keyOf(computeStatementMonth(r.date, card ? card.closingDay : 1));
       }
+
+      // Evita duplicar un gasto que ya se importó antes (típico en compras en
+      // cuotas: el mismo consumo aparece en el resumen de cada mes, avanzando
+      // de cuota). Si ya existe una transacción con la misma tarjeta, el mismo
+      // mes de inicio de cuota, el mismo total de cuotas y el mismo nombre
+      // original, se omite en vez de crear un duplicado.
+      const isDuplicate = data.transactions.some((t) =>
+        t.cardId === r.cardId &&
+        t.startMonth === startMonth &&
+        (t.cuotas || 1) === N &&
+        normDesc(t.rawDescription || t.description) === normDesc(r.rawDescription)
+      );
+      if (isDuplicate) { skipped++; return; }
+
       const amountNum = Number(r.amount) || 0;
       const rate = r.currency === "USD" ? (Number(r.exchangeRate) || 0) : 1;
       const finalDescription = r.description.trim() || r.rawDescription;
       const tx = {
         id: uid(),
         description: finalDescription,
+        rawDescription: r.rawDescription,
         amount: amountNum,
         currency: r.currency,
         exchangeRate: r.currency === "USD" ? rate : undefined,
         montoCuota: Math.round((amountNum / N) * 100) / 100,
         date: r.date,
         categoryId: r.categoryId,
-        cardId,
+        cardId: r.cardId,
         cuotas: N,
         startMonth,
         isFamily: r.isFamily,
@@ -1908,13 +1956,15 @@ function ImportView({ data, onImportTx, onLearnMapping, lookupMapping }) {
         isFamily: r.isFamily,
         familyPersonId: r.isFamily ? r.familyPersonId : null,
       });
+      imported++;
     });
-    setImportedCount(includedRows.length);
+    setImportedCount(imported);
+    setSkippedCount(skipped);
     setStep("done");
   };
 
   const resetAll = () => {
-    setStep("select"); setFile(null); setRows([]); setError(null); setImportedCount(0);
+    setStep("select"); setFile(null); setRows([]); setError(null); setImportedCount(0); setSkippedCount(0);
   };
 
   return (
@@ -1987,6 +2037,7 @@ function ImportView({ data, onImportTx, onLearnMapping, lookupMapping }) {
             <ImportRow
               key={row.id}
               row={row}
+              cards={cards}
               categories={categories}
               familyMembers={familyMembers}
               onChange={updateRow}
@@ -2012,7 +2063,8 @@ function ImportView({ data, onImportTx, onLearnMapping, lookupMapping }) {
           <div className="ect-section-title" style={{ justifyContent: "center" }}>¡Listo!</div>
           <div style={{ color: "var(--text-dim)", fontSize: 13.5, marginBottom: 20 }}>
             Se importaron {importedCount} gasto(s) al resumen de {labelOfKey(monthKey)}.
-            Las descripciones que hayas cambiado ya quedaron aprendidas para la próxima vez.
+            {skippedCount > 0 && <> Se omitieron {skippedCount} porque ya estaban cargados (misma tarjeta, mismo gasto y misma cuota).</>}
+            {" "}Las descripciones que hayas cambiado ya quedaron aprendidas para la próxima vez.
           </div>
           <button className="ect-btn" onClick={resetAll}><UploadCloud size={14} /> Importar otro resumen</button>
         </div>

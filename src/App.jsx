@@ -1288,6 +1288,37 @@ function ExpensesView({ data, monthKey, setMonthKey, onAdd, onEdit, onDelete, on
   );
 }
 
+/* Arma el desglose mes a mes de una lista de gastos familiares: cada compra
+   en cuotas aparece repartida en cada mes de resumen que le corresponde
+   (incluyendo meses futuros aún no facturados), con un subtotal por mes. */
+function buildFamilyMonthlyBreakdown(gastos) {
+  if (gastos.length === 0) return [];
+  let minMonth = gastos[0].startMonth;
+  let maxMonth = addMonthsToKey(gastos[0].startMonth, (gastos[0].cuotas || 1) - 1);
+  gastos.forEach((tx) => {
+    const start = tx.startMonth;
+    const end = addMonthsToKey(start, (tx.cuotas || 1) - 1);
+    if (monthsBetweenKeys(minMonth, start) < 0) minMonth = start;
+    if (monthsBetweenKeys(maxMonth, end) > 0) maxMonth = end;
+  });
+  const months = [];
+  let k = minMonth;
+  while (monthsBetweenKeys(k, maxMonth) >= 0) {
+    months.push(k);
+    k = addMonthsToKey(k, 1);
+  }
+  return months
+    .map((monthKey) => {
+      const items = gastos
+        .map((tx) => ({ tx, c: getContribution(tx, monthKey) }))
+        .filter((x) => x.c.active)
+        .sort((a, b) => new Date(a.tx.date) - new Date(b.tx.date));
+      const subtotal = items.reduce((a, x) => a + x.c.monto, 0);
+      return { monthKey, items, subtotal };
+    })
+    .filter((m) => m.items.length > 0);
+}
+
 /* ============================================================
    FAMILY VIEW
    ============================================================ */
@@ -1315,45 +1346,58 @@ function generateFamilyPDF(person, gastos, devs, balance) {
 
   doc.setFont("helvetica", "bold");
   doc.setFontSize(12);
-  doc.text("Gastos", marginX, y);
-  y += 7;
-  doc.setFontSize(9);
-  doc.setTextColor(120);
-  doc.text("Fecha", marginX, y);
-  doc.text("Descripción", marginX + 24, y);
-  doc.text("Cuotas", marginX + 128, y);
-  doc.text("Monto", rightX, y, { align: "right" });
-  doc.setTextColor(0);
-  y += 2;
-  doc.setDrawColor(200);
-  doc.line(marginX, y, rightX, y);
-  y += 6;
+  doc.text("Gastos por mes", marginX, y);
+  y += 3;
   doc.setFont("helvetica", "normal");
+  doc.setFontSize(8);
+  doc.setTextColor(120);
+  doc.text("Las compras en cuotas se reparten mes a mes hasta que terminan de pagarse.", marginX, y + 5);
+  doc.setTextColor(0);
+  y += 12;
 
-  const sortedGastos = [...gastos].sort((a, b) => new Date(a.date) - new Date(b.date));
-  if (sortedGastos.length === 0) {
+  const breakdown = buildFamilyMonthlyBreakdown(gastos);
+  if (breakdown.length === 0) {
+    doc.setFontSize(9);
     doc.setTextColor(140);
     doc.text("Sin gastos cargados.", marginX, y);
     doc.setTextColor(0);
     y += 8;
+  } else {
+    breakdown.forEach((m) => {
+      ensureSpace(16);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(10);
+      doc.text(labelOfKey(m.monthKey), marginX, y);
+      doc.text(fmt(m.subtotal), rightX, y, { align: "right" });
+      y += 2;
+      doc.setDrawColor(210);
+      doc.line(marginX, y, rightX, y);
+      y += 5;
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(9);
+      m.items.forEach(({ tx, c }) => {
+        ensureSpace(8);
+        const desc = tx.description.length > 46 ? tx.description.slice(0, 46) + "…" : tx.description;
+        const cuotaLabel = tx.cuotas > 1 ? `  (cuota ${c.cuotaNum}/${c.total})` : "";
+        const usdLabel = tx.currency === "USD" ? ` (USD ${tx.amount.toFixed(2)})` : "";
+        doc.text(desc + cuotaLabel + usdLabel, marginX + 4, y);
+        doc.text(fmt(c.monto), rightX, y, { align: "right" });
+        y += 6;
+      });
+      y += 5;
+    });
   }
-  sortedGastos.forEach((tx) => {
-    ensureSpace(8);
-    doc.text(fmtDate(tx.date), marginX, y);
-    const desc = tx.description.length > 48 ? tx.description.slice(0, 48) + "…" : tx.description;
-    doc.text(desc + (tx.currency === "USD" ? ` (USD ${tx.amount.toFixed(2)})` : ""), marginX + 24, y);
-    doc.text(tx.cuotas > 1 ? `${tx.cuotas} cuotas` : "contado", marginX + 128, y);
-    doc.text(fmt(txTotalARS(tx)), rightX, y, { align: "right" });
-    y += 6;
-  });
 
-  y += 3;
-  ensureSpace(10);
-  doc.setDrawColor(200);
+  const totalGastos = breakdown.reduce((a, m) => a + m.subtotal, 0);
+  ensureSpace(12);
+  doc.setDrawColor(160);
+  doc.setLineWidth(0.4);
   doc.line(marginX, y, rightX, y);
-  y += 6;
+  doc.setLineWidth(0.2);
+  y += 7;
   doc.setFont("helvetica", "bold");
-  doc.text(`Total gastos: ${fmt(gastos.reduce((a, tx) => a + txTotalARS(tx), 0))}`, marginX, y);
+  doc.setFontSize(11);
+  doc.text(`Total gastos: ${fmt(totalGastos)}`, marginX, y);
   y += 14;
 
   ensureSpace(20);
@@ -1463,26 +1507,44 @@ function FamilyView({ data, monthKey, onAddRepayment, onDeleteRepayment, onAddFa
 
           <div className="ect-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
             <div className="ect-panel">
-              <div className="ect-section-title">Gastos hechos con mi tarjeta <span className="tag">{current.gastos.length}</span></div>
-              {current.gastos.length === 0 ? <div className="ect-empty">Sin gastos cargados</div> : (
-                <div>
-                  {current.gastos.sort((a, b) => new Date(b.date) - new Date(a.date)).map(tx => {
-                    const card = cards.find(c => c.id === tx.cardId);
-                    return (
-                      <div className="ect-ledger-row" key={tx.id}>
-                        <span className="ect-dot" style={{ background: card?.color }} />
-                        <span className="ect-ledger-desc">{tx.description}</span>
-                        <CurrencyTag tx={tx} />
-                        {tx.cuotas > 1 && <span className="ect-badge gold">{tx.cuotas} cuotas</span>}
-                        <span className="ect-ledger-meta">{fmtDate(tx.date)}</span>
-                        <span className="ect-ledger-dots" />
-                        <span className="ect-ledger-amt">{fmt(txTotalARS(tx))}</span>
-                        <button className="ect-icon-btn del" onClick={() => onDeleteTx(tx.id)}><Trash2 size={12} /></button>
+              <div className="ect-section-title">Gastos por mes <span className="tag">{current.gastos.length}</span></div>
+              {(() => {
+                const breakdown = buildFamilyMonthlyBreakdown(current.gastos);
+                if (breakdown.length === 0) return <div className="ect-empty">Sin gastos cargados</div>;
+                const grandTotal = breakdown.reduce((a, m) => a + m.subtotal, 0);
+                return (
+                  <div>
+                    {breakdown.map((m) => (
+                      <div key={m.monthKey} style={{ marginBottom: 14 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+                          <span style={{ fontFamily: "'Fraunces', serif", fontSize: 13, fontWeight: 600, color: "var(--gold)" }}>
+                            {labelOfKey(m.monthKey)}
+                          </span>
+                          <span className="ect-mono" style={{ fontSize: 12.5, fontWeight: 600 }}>{fmt(m.subtotal)}</span>
+                        </div>
+                        {m.items.map(({ tx, c }) => {
+                          const card = cards.find((cc) => cc.id === tx.cardId);
+                          return (
+                            <div className="ect-ledger-row" key={tx.id + "-" + m.monthKey}>
+                              <span className="ect-dot" style={{ background: card?.color }} />
+                              <span className="ect-ledger-desc">{tx.description}</span>
+                              <CurrencyTag tx={tx} />
+                              {tx.cuotas > 1 && <span className="ect-badge gold">{c.cuotaNum}/{c.total}</span>}
+                              <span className="ect-ledger-dots" />
+                              <span className="ect-ledger-amt">{fmt(c.monto)}</span>
+                              <button className="ect-icon-btn del" onClick={() => onDeleteTx(tx.id)}><Trash2 size={12} /></button>
+                            </div>
+                          );
+                        })}
                       </div>
-                    );
-                  })}
-                </div>
-              )}
+                    ))}
+                    <div style={{ display: "flex", justifyContent: "space-between", borderTop: "1px solid var(--border)", paddingTop: 10, marginTop: 4 }}>
+                      <span style={{ fontWeight: 600, fontSize: 13.5 }}>Total</span>
+                      <span className="ect-mono" style={{ fontWeight: 700, color: "var(--gold)", fontSize: 14 }}>{fmt(grandTotal)}</span>
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
 
             <div className="ect-panel">

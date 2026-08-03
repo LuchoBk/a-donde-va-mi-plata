@@ -2207,7 +2207,37 @@ export default function App() {
   const addRepayment = (r) => setData(d => ({ ...d, repayments: [...d.repayments, r] }));
   const deleteRepayment = (id) => setData(d => ({ ...d, repayments: d.repayments.filter(r => r.id !== id) }));
 
-  const updateCard = (card) => setData(d => ({ ...d, cards: d.cards.map(c => c.id === card.id ? card : c) }));
+  const updateCard = (card) => {
+    const oldCard = data.cards.find((c) => c.id === card.id);
+    const closingDayChanged = oldCard && oldCard.closingDay !== card.closingDay;
+
+    if (!closingDayChanged) {
+      setData((d) => ({ ...d, cards: d.cards.map((c) => (c.id === card.id ? card : c)) }));
+      return;
+    }
+
+    // Al cambiar el día de cierre, recalculamos el mes de resumen de los
+    // gastos al contado de esa tarjeta (los que están en cuotas no se tocan,
+    // porque su mes de inicio se define a mano al cargarlos o importarlos).
+    let changedCount = 0;
+    const newTransactions = data.transactions.map((tx) => {
+      if (tx.cardId !== card.id || (tx.cuotas || 1) > 1) return tx;
+      const newStartMonth = keyOf(computeStatementMonth(tx.date, card.closingDay));
+      if (newStartMonth === tx.startMonth) return tx;
+      changedCount++;
+      return { ...tx, startMonth: newStartMonth };
+    });
+
+    setData((d) => ({
+      ...d,
+      cards: d.cards.map((c) => (c.id === card.id ? card : c)),
+      transactions: newTransactions,
+    }));
+
+    if (changedCount > 0) {
+      alert(`Se actualizó el día de cierre de "${card.name}" y se recalcularon ${changedCount} gasto(s) al contado para que caigan en el mes de resumen correcto.`);
+    }
+  };
   const addCard = (card) => setData(d => ({ ...d, cards: [...d.cards, card] }));
   const deleteCard = (id) => setData(d => ({ ...d, cards: d.cards.filter(c => c.id !== id) }));
 

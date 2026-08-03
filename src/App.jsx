@@ -1017,7 +1017,7 @@ function Dashboard({ data, monthKey, setMonthKey }) {
 
   const categoryTotals = useMemo(() => {
     const map = {};
-    transactions.filter(tx => !tx.isFamily).forEach(tx => {
+    transactions.forEach(tx => {
       const c = getContribution(tx, monthKey);
       if (c.active) map[tx.categoryId] = (map[tx.categoryId] || 0) + c.monto;
     });
@@ -1108,9 +1108,9 @@ function Dashboard({ data, monthKey, setMonthKey }) {
         </div>
 
         <div className="ect-panel">
-          <div className="ect-section-title">Gasto por categoría <span className="tag">sin familiares</span></div>
+          <div className="ect-section-title">Gasto por categoría <span className="tag">tarjeta completa</span></div>
           {categoryTotals.length === 0 ? (
-            <div className="ect-empty">Sin gastos personales cargados este mes</div>
+            <div className="ect-empty">Sin gastos cargados este mes</div>
           ) : (
             <ResponsiveContainer width="100%" height={230}>
               <PieChart>

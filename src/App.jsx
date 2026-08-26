@@ -2236,6 +2236,211 @@ function CategoriesView({ data, onAddCategory, onDeleteCategory }) {
 }
 
 /* ============================================================
+   SEARCH & ANALYSIS VIEW
+   ============================================================ */
+
+/* Pares de gastos que podrían ser el mismo cargo duplicado por error:
+   misma tarjeta, mismo monto, a pocos días de distancia */
+function findPossibleDuplicates(transactions) {
+  const sorted = [...transactions]
+    .filter((tx) => tx.amount !== 0)
+    .sort((a, b) => new Date(a.date) - new Date(b.date));
+  const results = [];
+  for (let i = 0; i < sorted.length; i++) {
+    for (let j = i + 1; j < sorted.length; j++) {
+      const a = sorted[i], b = sorted[j];
+      const daysDiff = Math.abs((new Date(b.date) - new Date(a.date)) / 86400000);
+      if (daysDiff > 3) break;
+      if (a.cardId !== b.cardId) continue;
+      if (a.currency !== b.currency) continue;
+      if (Math.abs(a.amount - b.amount) > 0.01) continue;
+      results.push({ a, b, daysDiff });
+    }
+  }
+  return results.slice(0, 10);
+}
+
+/* Gastos puntuales muy por encima del promedio de su categoría */
+function findAtypicalExpenses(transactions) {
+  const byCategory = {};
+  transactions.filter((tx) => !tx.isFamily && (tx.currency === "ARS" || hasKnownRate(tx))).forEach((tx) => {
+    if (!byCategory[tx.categoryId]) byCategory[tx.categoryId] = [];
+    byCategory[tx.categoryId].push(tx);
+  });
+  const results = [];
+  Object.values(byCategory).forEach((list) => {
+    if (list.length < 4) return;
+    const amounts = list.map((tx) => txCuotaARS(tx)).filter((v) => v > 0);
+    if (amounts.length < 4) return;
+    const avg = amounts.reduce((a, b) => a + b, 0) / amounts.length;
+    list.forEach((tx) => {
+      const val = txCuotaARS(tx);
+      if (val > avg * 3 && val > avg + 20000) {
+        results.push({ tx, avg, val });
+      }
+    });
+  });
+  return results.sort((a, b) => b.val - a.val).slice(0, 8);
+}
+
+function SearchView({ data }) {
+  const { transactions, cards, categories, familyMembers } = data;
+  const [query, setQuery] = useState("");
+
+  const groups = useMemo(() => {
+    if (!query.trim()) return [];
+    const q = normDesc(query);
+    const matches = transactions.filter((tx) =>
+      normDesc(tx.description).includes(q) || normDesc(tx.rawDescription || "").includes(q)
+    );
+    const byKey = {};
+    matches.forEach((tx) => {
+      const key = normDesc(tx.description);
+      if (!byKey[key]) byKey[key] = [];
+      byKey[key].push(tx);
+    });
+    return Object.values(byKey).map((txs) => {
+      const sorted = [...txs].sort((a, b) => monthsBetweenKeys(a.startMonth, b.startMonth) || new Date(a.date) - new Date(b.date));
+      const first = sorted[0];
+      const last = sorted[sorted.length - 1];
+      const knownAmounts = sorted.filter((tx) => tx.currency === "ARS" || hasKnownRate(tx));
+      const avg = knownAmounts.length ? knownAmounts.reduce((a, tx) => a + txCuotaARS(tx), 0) / knownAmounts.length : 0;
+      const pctChange = (first !== last && txCuotaARS(first) > 0 && hasKnownRate(first) && hasKnownRate(last))
+        ? ((txCuotaARS(last) - txCuotaARS(first)) / txCuotaARS(first)) * 100
+        : null;
+      const chartData = knownAmounts.map((tx) => ({ month: shortLabelOfKey(tx.startMonth), monto: Math.round(txCuotaARS(tx)) }));
+      return { description: last.description, txs: sorted, count: sorted.length, avg, pctChange, chartData };
+    }).sort((a, b) => b.count - a.count);
+  }, [query, transactions]);
+
+  const duplicates = useMemo(() => findPossibleDuplicates(transactions), [transactions]);
+  const atypical = useMemo(() => findAtypicalExpenses(transactions), [transactions]);
+
+  return (
+    <div>
+      <div className="ect-topbar">
+        <div className="ect-page-title">Buscar y analizar</div>
+      </div>
+
+      <div className="ect-panel" style={{ marginBottom: 22 }}>
+        <div style={{ position: "relative" }}>
+          <Search size={15} style={{ position: "absolute", left: 12, top: 12, color: "var(--text-dim)" }} />
+          <input
+            className="ect-input"
+            style={{ width: "100%", paddingLeft: 36 }}
+            placeholder="Buscar un gasto por descripción (ej: Netflix, Uber, Supermercado...)"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            autoFocus
+          />
+        </div>
+      </div>
+
+      {query.trim() && (
+        groups.length === 0 ? (
+          <div className="ect-empty">No encontré ningún gasto que coincida con "{query}"</div>
+        ) : (
+          groups.map((g, i) => (
+            <div className="ect-panel" key={i} style={{ marginBottom: 18 }}>
+              <div className="ect-section-title">
+                {g.description}
+                <span className="tag">{g.count} {g.count === 1 ? "vez" : "veces"}</span>
+                {g.pctChange !== null && Math.abs(g.pctChange) >= 3 && (
+                  <span className="ect-badge" style={{ color: g.pctChange > 0 ? "var(--red)" : "var(--green)", borderColor: g.pctChange > 0 ? "var(--red)" : "var(--green)" }}>
+                    {g.pctChange > 0 ? "▲" : "▼"} {Math.abs(g.pctChange).toFixed(0)}% desde la primera vez
+                  </span>
+                )}
+              </div>
+
+              {g.chartData.length >= 2 && (
+                <ResponsiveContainer width="100%" height={140}>
+                  <LineChart data={g.chartData}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#2A3250" vertical={false} />
+                    <XAxis dataKey="month" tick={{ fill: "var(--text-dim)", fontSize: 11 }} axisLine={{ stroke: "var(--border)" }} tickLine={false} />
+                    <YAxis tick={{ fill: "var(--text-dim)", fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`} />
+                    <Tooltip contentStyle={{ background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmt(v)} />
+                    <Line type="monotone" dataKey="monto" stroke="var(--gold)" strokeWidth={2} dot={{ fill: "var(--gold)", r: 3 }} />
+                  </LineChart>
+                </ResponsiveContainer>
+              )}
+
+              <div style={{ marginTop: 10 }}>
+                {g.txs.map((tx) => {
+                  const card = cards.find((c) => c.id === tx.cardId);
+                  return (
+                    <div className="ect-ledger-row" key={tx.id}>
+                      <span className="ect-dot" style={{ background: card?.color }} />
+                      <span className="ect-ledger-meta">{shortLabelOfKey(tx.startMonth)}</span>
+                      <span className="ect-ledger-desc" style={{ maxWidth: 120 }}>{card?.name}</span>
+                      <CurrencyTag tx={tx} />
+                      {tx.cuotas > 1 && <span className="ect-badge gold">{tx.cuotas} cuotas</span>}
+                      {tx.isFamily && <span className="ect-badge blue">{familyMembers.find((f) => f.id === tx.familyPersonId)?.name || "familiar"}</span>}
+                      <span className="ect-ledger-dots" />
+                      <span className="ect-ledger-amt">{formatTxMonto(tx)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))
+        )
+      )}
+
+      {!query.trim() && (
+        <div className="ect-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
+          <div className="ect-panel">
+            <div className="ect-section-title"><Copy size={15} /> Posibles duplicados</div>
+            {duplicates.length === 0 ? (
+              <div className="ect-empty">No detecté cargos que parezcan duplicados</div>
+            ) : (
+              <div>
+                {duplicates.map(({ a, b, daysDiff }, i) => {
+                  const card = cards.find((c) => c.id === a.cardId);
+                  return (
+                    <div key={i} style={{ padding: "10px 0", borderBottom: i < duplicates.length - 1 ? "1px solid var(--border)" : "none" }}>
+                      <div style={{ fontSize: 12.5, marginBottom: 4 }}>
+                        <span className="ect-dot" style={{ background: card?.color, marginRight: 6 }} />
+                        {a.description === b.description ? a.description : `${a.description} / ${b.description}`}
+                      </div>
+                      <div style={{ fontSize: 11.5, color: "var(--text-dim)" }}>
+                        {fmtDate(a.date)} y {fmtDate(b.date)} ({daysDiff === 0 ? "mismo día" : `${daysDiff.toFixed(0)} día(s) de diferencia`}) · {a.currency === "USD" ? fmtUSD(a.amount) : fmt(a.amount)} cada uno
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          <div className="ect-panel">
+            <div className="ect-section-title"><AlertTriangle size={15} /> Gastos atípicos</div>
+            {atypical.length === 0 ? (
+              <div className="ect-empty">No detecté gastos fuera de lo normal para su categoría</div>
+            ) : (
+              <div>
+                {atypical.map(({ tx, avg, val }, i) => {
+                  const cat = categories.find((c) => c.id === tx.categoryId);
+                  return (
+                    <div className="ect-ledger-row" key={i}>
+                      <span className="ect-dot" style={{ background: cat?.color }} />
+                      <span className="ect-ledger-desc">{tx.description}</span>
+                      <span className="ect-ledger-meta">{fmtDate(tx.date)}</span>
+                      <span className="ect-ledger-dots" />
+                      <span className="ect-ledger-amt" style={{ color: "var(--red)" }}>{fmt(val)}</span>
+                    </div>
+                  );
+                })}
+                <div className="ect-form-hint" style={{ marginTop: 10 }}>Comparado contra el promedio de su categoría.</div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
    IMPORT PDF VIEW
    ============================================================ */
 
@@ -2750,6 +2955,7 @@ export default function App() {
   const NAV = [
     { id: "dashboard", label: "Panel general", icon: LayoutDashboard },
     { id: "gastos", label: "Gastos", icon: Receipt },
+    { id: "buscar", label: "Buscar", icon: Search },
     { id: "importar", label: "Importar PDF", icon: UploadCloud },
     { id: "familia", label: "Familia", icon: Users },
     { id: "tarjetas", label: "Tarjetas", icon: CreditCard },
@@ -2813,6 +3019,7 @@ export default function App() {
             onAddCategory={addCategory} onAddFamily={addFamily}
           />
         )}
+        {tab === "buscar" && <SearchView data={data} />}
         {tab === "importar" && (
           <ImportView data={data} onImportTx={addTx} onLearnMapping={upsertMapping} lookupMapping={lookupMapping} />
         )}

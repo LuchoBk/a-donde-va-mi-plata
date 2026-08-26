@@ -129,6 +129,28 @@ function formatTxTotalMonto(tx) {
   return fmt(txTotalARS(tx));
 }
 
+/* Exporta filas de gastos (ya filtradas) a un archivo .xlsx */
+async function exportRowsToExcel(rows, filename, familyMembers) {
+  const XLSX = await import("xlsx");
+  const data = rows.map(({ tx, card, cat, c }) => ({
+    Fecha: fmtDate(tx.date),
+    Descripción: tx.description,
+    Tarjeta: card?.name || "",
+    Categoría: cat?.name || "",
+    Moneda: tx.currency,
+    "Monto original": tx.currency === "USD" ? tx.amount : tx.amount,
+    "Tipo de cambio": tx.currency === "USD" ? (tx.exchangeRate || "") : "",
+    "Monto (ARS)": Math.round((c?.monto ?? txCuotaARS(tx)) * 100) / 100,
+    Cuota: tx.cuotas > 1 ? `${c?.cuotaNum ?? ""}/${tx.cuotas}` : "contado",
+    Familiar: tx.isFamily ? (familyMembers.find((f) => f.id === tx.familyPersonId)?.name || "sí") : "no",
+  }));
+  const ws = XLSX.utils.json_to_sheet(data);
+  ws["!cols"] = [{ wch: 11 }, { wch: 32 }, { wch: 20 }, { wch: 16 }, { wch: 8 }, { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 10 }, { wch: 14 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Gastos");
+  XLSX.writeFile(wb, filename);
+}
+
 /* Contribución de una transacción a un mes de resumen puntual (targetKey),
    usando el startMonth ya calculado/guardado en la transacción */
 function getContribution(tx, targetKey) {
@@ -202,6 +224,7 @@ const emptyData = () => ({
   descriptionMappings: {},
   lastBackupAt: null,
   theme: "dark",
+  closedMonths: [],
 });
 
 /* Asegura que tarjetas guardadas antes de esta versión tengan los campos nuevos */
@@ -266,6 +289,7 @@ const GlobalStyle = () => (
       height: 100vh;
       position: sticky;
       top: 0;
+      overflow-y: auto;
     }
     .ect-brand {
       font-family: 'Fraunces', serif;
@@ -1445,7 +1469,7 @@ function Dashboard({ data, monthKey, setMonthKey }) {
    EXPENSES VIEW
    ============================================================ */
 
-function ExpensesView({ data, monthKey, setMonthKey, onAdd, onEdit, onDelete, onAddCategory, onAddFamily }) {
+function ExpensesView({ data, monthKey, setMonthKey, onAdd, onEdit, onDelete, onAddCategory, onAddFamily, onToggleMonthClosed }) {
   const { cards, categories, transactions, familyMembers } = data;
   const [filterCard, setFilterCard] = useState("all");
   const [filterCat, setFilterCat] = useState("all");
@@ -1455,6 +1479,8 @@ function ExpensesView({ data, monthKey, setMonthKey, onAdd, onEdit, onDelete, on
   const [viewMode, setViewMode] = useState("mes");
   const [rangeFrom, setRangeFrom] = useState(() => { const d = new Date(); d.setDate(1); return d.toISOString().slice(0, 10); });
   const [rangeTo, setRangeTo] = useState(() => new Date().toISOString().slice(0, 10));
+
+  const isMonthClosed = viewMode === "mes" && (data.closedMonths || []).includes(monthKey);
 
   const rows = useMemo(() => {
     let base;
@@ -1482,6 +1508,13 @@ function ExpensesView({ data, monthKey, setMonthKey, onAdd, onEdit, onDelete, on
   }, [transactions, cards, categories, monthKey, filterCard, filterCat, filterFamily, viewMode, rangeFrom, rangeTo]);
 
   const total = rows.reduce((a, r) => a + r.c.monto, 0);
+
+  const handleExport = () => {
+    const filename = viewMode === "mes"
+      ? `gastos-${labelOfKey(monthKey).replace(/\s+/g, "_").toLowerCase()}.xlsx`
+      : `gastos-${rangeFrom}_a_${rangeTo}.xlsx`;
+    exportRowsToExcel(rows, filename, familyMembers);
+  };
 
   return (
     <div>
@@ -1513,9 +1546,30 @@ function ExpensesView({ data, monthKey, setMonthKey, onAdd, onEdit, onDelete, on
               <input type="date" value={rangeTo} onChange={(e) => setRangeTo(e.target.value)} style={{ background: "transparent", border: "none", color: "var(--text)", fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5 }} />
             </div>
           )}
-          <button className="ect-btn" onClick={() => { setEditing(null); setShowForm(true); }}><Plus size={15} /> Nuevo gasto</button>
+          {viewMode === "mes" && (
+            <button
+              className="ect-icon-btn"
+              title={isMonthClosed ? "Reabrir este mes" : "Cerrar este mes (protegerlo de ediciones)"}
+              onClick={() => onToggleMonthClosed(monthKey)}
+              style={isMonthClosed ? { color: "var(--gold)", borderColor: "var(--gold)" } : undefined}
+            >
+              {isMonthClosed ? <Lock size={13} /> : <Unlock size={13} />}
+            </button>
+          )}
+          <button className="ect-btn ghost sm" onClick={handleExport} disabled={rows.length === 0}>
+            <FileSpreadsheet size={14} /> Excel
+          </button>
+          <button className="ect-btn" onClick={() => { setEditing(null); setShowForm(true); }} disabled={isMonthClosed}>
+            <Plus size={15} /> Nuevo gasto
+          </button>
         </div>
       </div>
+
+      {isMonthClosed && (
+        <div className="ect-form-hint" style={{ marginBottom: 14, display: "flex", alignItems: "center", gap: 6 }}>
+          <Lock size={12} /> Este mes está cerrado. Los gastos quedan protegidos de ediciones o borrados accidentales — hacé clic en el candado para reabrirlo.
+        </div>
+      )}
 
       {viewMode === "rango" && (
         <div className="ect-form-hint" style={{ marginBottom: 12 }}>
@@ -1565,10 +1619,14 @@ function ExpensesView({ data, monthKey, setMonthKey, onAdd, onEdit, onDelete, on
                   <td>{tx.cuotas > 1 ? <span className="ect-badge gold">{c.cuotaNum ? `${c.cuotaNum}/${c.total}` : `${c.total} cuotas`}</span> : <span className="ect-badge">contado</span>}</td>
                   <td className="amt">{viewMode === "rango" ? formatTxTotalMonto(tx) : formatTxMonto(tx)}</td>
                   <td>
-                    <div className="row-actions">
-                      <button className="ect-icon-btn" onClick={() => { setEditing(tx); setShowForm(true); }}><Pencil size={13} /></button>
-                      <button className="ect-icon-btn del" onClick={() => onDelete(tx.id)}><Trash2 size={13} /></button>
-                    </div>
+                    {isMonthClosed ? (
+                      <div className="row-actions"><Lock size={13} color="var(--text-dim)" /></div>
+                    ) : (
+                      <div className="row-actions">
+                        <button className="ect-icon-btn" onClick={() => { setEditing(tx); setShowForm(true); }}><Pencil size={13} /></button>
+                        <button className="ect-icon-btn del" onClick={() => onDelete(tx.id)}><Trash2 size={13} /></button>
+                      </div>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -2236,6 +2294,222 @@ function CategoriesView({ data, onAddCategory, onDeleteCategory }) {
 }
 
 /* ============================================================
+   YEAR SUMMARY VIEW
+   ============================================================ */
+
+function YearNav({ year, setYear }) {
+  return (
+    <div className="ect-month-nav">
+      <button className="arrow" onClick={() => setYear(year - 1)}><ChevronLeft size={16} /></button>
+      <span className="ect-month-label">{year}</span>
+      <button className="arrow" onClick={() => setYear(year + 1)}><ChevronRight size={16} /></button>
+    </div>
+  );
+}
+
+function YearSummaryView({ data }) {
+  const { transactions, categories } = data;
+  const [year, setYear] = useState(new Date().getFullYear());
+
+  const monthlyTotals = useMemo(() => {
+    const out = [];
+    for (let m = 1; m <= 12; m++) {
+      const k = `${year}-${String(m).padStart(2, "0")}`;
+      let total = 0, totalUSD = 0;
+      transactions.forEach((tx) => {
+        const c = getContribution(tx, k);
+        if (c.active) { total += c.monto; if (tx.currency === "USD") totalUSD += tx.montoCuota; }
+      });
+      out.push({ month: shortLabelOfKey(k), key: k, total: Math.round(total), totalUSD: Math.round(totalUSD * 100) / 100 });
+    }
+    return out;
+  }, [transactions, year]);
+
+  const yearTotal = monthlyTotals.reduce((a, m) => a + m.total, 0);
+  const yearTotalUSD = monthlyTotals.reduce((a, m) => a + m.totalUSD, 0);
+  const maxMonth = monthlyTotals.reduce((max, m) => (m.total > max.total ? m : max), monthlyTotals[0]);
+
+  const categoryTotals = useMemo(() => {
+    const map = {};
+    for (let m = 1; m <= 12; m++) {
+      const k = `${year}-${String(m).padStart(2, "0")}`;
+      transactions.forEach((tx) => {
+        const c = getContribution(tx, k);
+        if (c.active) map[tx.categoryId] = (map[tx.categoryId] || 0) + c.monto;
+      });
+    }
+    return categories
+      .map((cat) => ({ name: cat.name, color: cat.color, value: map[cat.id] || 0 }))
+      .filter((x) => x.value > 0)
+      .sort((a, b) => b.value - a.value);
+  }, [transactions, categories, year]);
+
+  const prevYearTotal = useMemo(() => {
+    let t = 0;
+    for (let m = 1; m <= 12; m++) {
+      const k = `${year - 1}-${String(m).padStart(2, "0")}`;
+      transactions.forEach((tx) => { const c = getContribution(tx, k); if (c.active) t += c.monto; });
+    }
+    return t;
+  }, [transactions, year]);
+
+  const yoyChange = prevYearTotal > 0 ? ((yearTotal - prevYearTotal) / prevYearTotal) * 100 : null;
+  const catTotal = categoryTotals.reduce((a, c) => a + c.value, 0);
+
+  return (
+    <div>
+      <div className="ect-topbar">
+        <div className="ect-page-title">Resumen anual</div>
+        <YearNav year={year} setYear={setYear} />
+      </div>
+
+      <div className="ect-grid" style={{ gridTemplateColumns: "repeat(4, 1fr)", marginBottom: 22 }}>
+        <div className="ect-panel">
+          <div className="ect-kpi-label">Total del año (pesos)</div>
+          <div className="ect-kpi-value gold">{fmt(yearTotal)}</div>
+          {yoyChange !== null && (
+            <div className={`ect-kpi-delta ${yoyChange >= 0 ? "up" : "down"}`}>
+              {yoyChange >= 0 ? "▲" : "▼"} {Math.abs(yoyChange).toFixed(1)}% vs. {year - 1}
+            </div>
+          )}
+        </div>
+        <div className="ect-panel">
+          <div className="ect-kpi-label">Total del año (dólares)</div>
+          <div className="ect-kpi-value">{fmtUSD(yearTotalUSD)}</div>
+        </div>
+        <div className="ect-panel">
+          <div className="ect-kpi-label">Mes más caro</div>
+          <div className="ect-kpi-value" style={{ fontSize: 19 }}>{maxMonth?.total > 0 ? maxMonth.month : "—"}</div>
+          {maxMonth?.total > 0 && <div className="ect-form-hint">{fmt(maxMonth.total)}</div>}
+        </div>
+        <div className="ect-panel">
+          <div className="ect-kpi-label">Categoría principal</div>
+          <div className="ect-kpi-value" style={{ fontSize: 19 }}>{categoryTotals[0]?.name || "—"}</div>
+          {categoryTotals[0] && <div className="ect-form-hint">{fmt(categoryTotals[0].value)}</div>}
+        </div>
+      </div>
+
+      <div className="ect-panel" style={{ marginBottom: 22 }}>
+        <div className="ect-section-title">Gasto por mes — {year}</div>
+        <ResponsiveContainer width="100%" height={260}>
+          <BarChart data={monthlyTotals}>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+            <XAxis dataKey="month" tick={{ fill: "var(--text-dim)", fontSize: 11 }} axisLine={{ stroke: "var(--border)" }} tickLine={false} />
+            <YAxis tick={{ fill: "var(--text-dim)", fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`} />
+            <Tooltip contentStyle={{ background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmt(v)} />
+            <Bar dataKey="total" fill="var(--gold)" radius={[4, 4, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      <div className="ect-panel">
+        <div className="ect-section-title">Por categoría — {year}</div>
+        {categoryTotals.length === 0 ? (
+          <div className="ect-empty">Sin gastos cargados en {year}</div>
+        ) : (
+          <div>
+            {categoryTotals.map((cat) => (
+              <div key={cat.name} style={{ marginBottom: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 4 }}>
+                  <span><span className="ect-dot" style={{ background: cat.color, marginRight: 6 }} />{cat.name}</span>
+                  <span className="ect-mono">{fmt(cat.value)} <span style={{ color: "var(--text-dim)" }}>({((cat.value / catTotal) * 100).toFixed(0)}%)</span></span>
+                </div>
+                <div style={{ height: 6, borderRadius: 4, background: "var(--surface-2)", overflow: "hidden" }}>
+                  <div style={{ height: "100%", width: `${(cat.value / catTotal) * 100}%`, background: cat.color, borderRadius: 4 }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   CALENDAR VIEW
+   ============================================================ */
+
+function CalendarView({ data }) {
+  const { transactions } = data;
+  const [monthDate, setMonthDate] = useState(() => { const d = new Date(); d.setDate(1); return d; });
+
+  const dailyTotals = useMemo(() => {
+    const map = {};
+    const y = monthDate.getFullYear(), m = monthDate.getMonth();
+    transactions.forEach((tx) => {
+      const d = new Date(tx.date + "T00:00:00");
+      if (d.getFullYear() === y && d.getMonth() === m) {
+        const val = tx.currency === "USD" ? (hasKnownRate(tx) ? txTotalARS(tx) : 0) : tx.amount;
+        map[tx.date] = (map[tx.date] || 0) + val;
+      }
+    });
+    return map;
+  }, [transactions, monthDate]);
+
+  const maxDay = Math.max(1, ...Object.values(dailyTotals).map((v) => Math.abs(v)));
+  const year = monthDate.getFullYear(), month = monthDate.getMonth();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const firstWeekday = (new Date(year, month, 1).getDay() + 6) % 7; // lunes=0
+  const cells = [];
+  for (let i = 0; i < firstWeekday; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+  const monthKeyLabel = monthDate.toLocaleDateString("es-AR", { month: "long", year: "numeric" });
+  const totalMonth = Object.values(dailyTotals).reduce((a, v) => a + v, 0);
+
+  const changeMonth = (delta) => setMonthDate((d) => { const nd = new Date(d); nd.setMonth(nd.getMonth() + delta); return nd; });
+
+  return (
+    <div>
+      <div className="ect-topbar">
+        <div className="ect-page-title">Calendario de gastos</div>
+        <div className="ect-month-nav">
+          <button className="arrow" onClick={() => changeMonth(-1)}><ChevronLeft size={16} /></button>
+          <span className="ect-month-label" style={{ textTransform: "capitalize" }}>{monthKeyLabel}</span>
+          <button className="arrow" onClick={() => changeMonth(1)}><ChevronRight size={16} /></button>
+        </div>
+      </div>
+
+      <div className="ect-form-hint" style={{ marginBottom: 14 }}>
+        Total del mes (por fecha real de compra): <strong style={{ color: "var(--text)" }}>{fmt(totalMonth)}</strong>. Los gastos en USD sin tipo de cambio no se incluyen en los colores.
+      </div>
+
+      <div className="ect-panel">
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 6, marginBottom: 8 }}>
+          {["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"].map((d) => (
+            <div key={d} style={{ textAlign: "center", fontSize: 10.5, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: 0.5 }}>{d}</div>
+          ))}
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 6 }}>
+          {cells.map((day, i) => {
+            if (day === null) return <div key={i} />;
+            const dateKey = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+            const val = dailyTotals[dateKey] || 0;
+            const intensity = val > 0 ? Math.min(1, val / maxDay) : 0;
+            return (
+              <div
+                key={i}
+                title={val > 0 ? fmt(val) : "Sin gastos"}
+                style={{
+                  aspectRatio: "1", borderRadius: 8, padding: "6px 8px",
+                  background: intensity > 0 ? `rgba(201, 161, 93, ${0.1 + intensity * 0.75})` : "var(--surface-2)",
+                  border: "1px solid var(--border)",
+                  display: "flex", flexDirection: "column", justifyContent: "space-between",
+                }}
+              >
+                <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{day}</span>
+                {val > 0 && <span className="ect-mono" style={{ fontSize: 10.5, fontWeight: 600 }}>{(val / 1000).toFixed(0)}k</span>}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
    SEARCH & ANALYSIS VIEW
    ============================================================ */
 
@@ -2814,6 +3088,7 @@ export default function App() {
           descriptionMappings: parsed.descriptionMappings || {},
           lastBackupAt: parsed.lastBackupAt || null,
           theme: parsed.theme === "light" ? "light" : "dark",
+          closedMonths: parsed.closedMonths || [],
         };
         setData(migrated);
       } else {
@@ -2902,6 +3177,10 @@ export default function App() {
 
   const updateSalary = (val) => setData(d => ({ ...d, sueldo: val }));
   const toggleTheme = () => setData(d => ({ ...d, theme: d.theme === "light" ? "dark" : "light" }));
+  const toggleMonthClosed = (mk) => setData((d) => {
+    const cm = d.closedMonths || [];
+    return { ...d, closedMonths: cm.includes(mk) ? cm.filter((k) => k !== mk) : [...cm, mk] };
+  });
 
   const lookupMapping = (rawDescription) => data.descriptionMappings[normDesc(rawDescription)] || null;
   const upsertMapping = (rawDescription, info) => {
@@ -2939,6 +3218,7 @@ export default function App() {
             descriptionMappings: parsed.descriptionMappings || {},
             lastBackupAt: parsed.lastBackupAt || null,
             theme: parsed.theme === "light" ? "light" : "dark",
+            closedMonths: parsed.closedMonths || [],
           });
           alert("Backup importado correctamente.");
         } else {
@@ -2960,6 +3240,8 @@ export default function App() {
     { id: "familia", label: "Familia", icon: Users },
     { id: "tarjetas", label: "Tarjetas", icon: CreditCard },
     { id: "categorias", label: "Categorías", icon: Tag },
+    { id: "anual", label: "Resumen anual", icon: TrendingUp },
+    { id: "calendario", label: "Calendario", icon: CalendarClock },
   ];
 
   const daysSinceBackup = data.lastBackupAt
@@ -3017,6 +3299,7 @@ export default function App() {
             data={data} monthKey={monthKey} setMonthKey={setMonthKey}
             onAdd={addTx} onEdit={editTx} onDelete={deleteTx}
             onAddCategory={addCategory} onAddFamily={addFamily}
+            onToggleMonthClosed={toggleMonthClosed}
           />
         )}
         {tab === "buscar" && <SearchView data={data} />}
@@ -3041,6 +3324,8 @@ export default function App() {
         {tab === "categorias" && (
           <CategoriesView data={data} onAddCategory={addCategory} onDeleteCategory={deleteCategory} />
         )}
+        {tab === "anual" && <YearSummaryView data={data} />}
+        {tab === "calendario" && <CalendarView data={data} />}
       </div>
 
       {showSalaryModal && (

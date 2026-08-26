@@ -6,7 +6,8 @@ import {
 import {
   LayoutDashboard, Receipt, Users, CreditCard, Tag, Plus, X, Pencil, Trash2,
   ChevronLeft, ChevronRight, Check, ArrowDownCircle, ArrowUpCircle, Layers,
-  CalendarClock, FileDown, UploadCloud, AlertTriangle, FileText, Loader2
+  CalendarClock, FileDown, UploadCloud, AlertTriangle, FileText, Loader2,
+  TrendingUp, TrendingDown, RefreshCw, BellRing, DollarSign
 } from "lucide-react";
 import jsPDF from "jspdf";
 
@@ -105,8 +106,18 @@ function guessCardForSubAccount(subAccount, cards, fallbackCardId) {
 
 /* Conversión a ARS según la moneda original del gasto */
 function rateOf(tx) { return tx.currency === "USD" ? (Number(tx.exchangeRate) || 0) : 1; }
+function hasKnownRate(tx) { return tx.currency !== "USD" || Number(tx.exchangeRate) > 0; }
 function txTotalARS(tx) { return Math.round(tx.amount * rateOf(tx) * 100) / 100; }
 function txCuotaARS(tx) { return Math.round(tx.montoCuota * rateOf(tx) * 100) / 100; }
+
+/* Texto a mostrar para el monto de una cuota: en ARS si se conoce el tipo de
+   cambio, o en USD con aviso si todavía no se cargó */
+function formatTxMonto(tx) {
+  if (tx.currency === "USD" && !hasKnownRate(tx)) {
+    return `${fmtUSD(tx.montoCuota)} (TC pend.)`;
+  }
+  return fmt(txCuotaARS(tx));
+}
 
 /* Contribución de una transacción a un mes de resumen puntual (targetKey),
    usando el startMonth ya calculado/guardado en la transacción */
@@ -140,14 +151,14 @@ function migrateTransaction(tx, cards) {
    ============================================================ */
 
 const SEED_CARDS = [
-  { id: "naranjax", name: "Naranja X", type: "credito", owner: "propia", closingDay: 19, color: "#C9A15D" },
-  { id: "mc-naranjax", name: "Mastercard Naranja X", type: "credito", owner: "propia", closingDay: 19, color: "#8C7A5B" },
-  { id: "cabal-credicoop", name: "CABAL Credicoop", type: "credito", owner: "propia", closingDay: 8, color: "#6E8FBF" },
-  { id: "visa-credicoop", name: "VISA Credicoop", type: "credito", owner: "propia", closingDay: 8, color: "#BD5C48" },
-  { id: "visa-bbva", name: "VISA BBVA (novia)", type: "credito", owner: "novia", closingDay: 12, color: "#7F9C6E" },
-  { id: "visa-galicia", name: "VISA Galicia (novia)", type: "credito", owner: "novia", closingDay: 6, color: "#A87FBF" },
-  { id: "prestamo-mp", name: "Préstamo MercadoPago", type: "prestamo", owner: "propia", closingDay: 16, color: "#5C9C6E" },
-  { id: "efectivo", name: "Efectivo / Transferencia", type: "efectivo", owner: "propia", closingDay: 1, color: "#9AA1B8" },
+  { id: "naranjax", name: "Naranja X", type: "credito", owner: "propia", closingDay: 19, color: "#C9A15D", limite: 0 },
+  { id: "mc-naranjax", name: "Mastercard Naranja X", type: "credito", owner: "propia", closingDay: 19, color: "#8C7A5B", limite: 0 },
+  { id: "cabal-credicoop", name: "CABAL Credicoop", type: "credito", owner: "propia", closingDay: 8, color: "#6E8FBF", limite: 0 },
+  { id: "visa-credicoop", name: "VISA Credicoop", type: "credito", owner: "propia", closingDay: 8, color: "#BD5C48", limite: 0 },
+  { id: "visa-bbva", name: "VISA BBVA (novia)", type: "credito", owner: "novia", closingDay: 12, color: "#7F9C6E", limite: 0 },
+  { id: "visa-galicia", name: "VISA Galicia (novia)", type: "credito", owner: "novia", closingDay: 6, color: "#A87FBF", limite: 0 },
+  { id: "prestamo-mp", name: "Préstamo MercadoPago", type: "prestamo", owner: "propia", closingDay: 16, color: "#5C9C6E", limite: 0 },
+  { id: "efectivo", name: "Efectivo / Transferencia", type: "efectivo", owner: "propia", closingDay: 1, color: "#9AA1B8", limite: 0 },
 ];
 
 const SEED_CATEGORIES = [
@@ -179,7 +190,13 @@ const emptyData = () => ({
   repayments: [],
   sueldo: 2000000,
   descriptionMappings: {},
+  lastBackupAt: null,
 });
+
+/* Asegura que tarjetas guardadas antes de esta versión tengan el campo límite */
+function ensureCardDefaults(cards) {
+  return cards.map((c) => ({ limite: 0, ...c }));
+}
 
 /* ============================================================
    STYLE
@@ -654,6 +671,18 @@ const GlobalStyle = () => (
     ::-webkit-scrollbar-track { background: var(--bg); }
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
     .ect-spin { animation: ect-spin-kf 0.9s linear infinite; }
+    .ect-backup-banner {
+      display: flex; align-items: center; gap: 10px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--gold);
+      border-radius: 8px;
+      padding: 11px 16px;
+      margin-bottom: 20px;
+      font-size: 13px;
+      color: var(--text);
+    }
+    .ect-backup-banner svg { color: var(--gold); flex-shrink: 0; }
     @keyframes ect-spin-kf { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
   `}</style>
 );
@@ -754,8 +783,8 @@ function TransactionForm({ initial, cards, categories, familyMembers, allTransac
   const cuotaARS = Math.round(cuotaOriginal * rateNum * 100) / 100;
 
   const cuotasValid = !enCuotas || (Number(cuotasTotal) >= 2 && Number(cuotaActual) >= 1 && Number(cuotaActual) <= Number(cuotasTotal));
-  const canSave = description.trim() && amountNum > 0 && date && categoryId && cardId &&
-    (!esFamiliar || familyPersonId) && (currency !== "USD" || rateNum > 0) && cuotasValid;
+  const canSave = description.trim() && amountNum !== 0 && date && categoryId && cardId &&
+    (!esFamiliar || familyPersonId) && cuotasValid;
 
   const handleSave = () => {
     const N = enCuotas ? Math.max(1, Number(cuotasTotal)) : 1;
@@ -810,16 +839,19 @@ function TransactionForm({ initial, cards, categories, familyMembers, allTransac
         </div>
         <div className="ect-form-row">
           <label>Monto {currency === "USD" ? "(USD)" : "(ARS)"}</label>
-          <input type="number" step="0.01" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" />
+          <input type="number" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" />
+          <div className="ect-form-hint">Usá un monto negativo para cargar un descuento o crédito que resta del resumen.</div>
         </div>
       </div>
 
       {currency === "USD" && (
         <div className="ect-form-row">
-          <label>Tipo de cambio (ARS por USD, al momento de la compra)</label>
-          <input type="number" step="0.01" min="0" value={exchangeRate} onChange={(e) => setExchangeRate(e.target.value)} placeholder="Ej: 1250.00" />
-          {amountNum > 0 && rateNum > 0 && (
+          <label>Tipo de cambio (ARS por USD) — opcional</label>
+          <input type="number" step="0.01" min="0" value={exchangeRate} onChange={(e) => setExchangeRate(e.target.value)} placeholder="Dejalo vacío si todavía no lo sabés" />
+          {amountNum !== 0 && rateNum > 0 ? (
             <div className="ect-form-hint">Equivale a {fmt(totalARS)}</div>
+          ) : (
+            <div className="ect-form-hint">Sin tipo de cambio, este gasto se va a trackear en dólares hasta que lo completes (por ejemplo cuando pagues el resumen).</div>
           )}
         </div>
       )}
@@ -879,7 +911,9 @@ function TransactionForm({ initial, cards, categories, familyMembers, allTransac
             </div>
           </div>
           <div className="ect-form-hint" style={{ marginTop: -8, marginBottom: 14 }}>
-            Cuota por período: {fmt(cuotaARS)}{currency === "USD" ? ` (USD ${cuotaOriginal.toFixed(2)})` : ""}
+            {currency === "USD" && rateNum <= 0
+              ? `Cuota por período: USD ${cuotaOriginal.toFixed(2)} (sin TC todavía)`
+              : `Cuota por período: ${fmt(cuotaARS)}${currency === "USD" ? ` (USD ${cuotaOriginal.toFixed(2)})` : ""}`}
           </div>
         </>
       )}
@@ -979,7 +1013,7 @@ function EditSalaryModal({ current, onSave, onClose }) {
    ============================================================ */
 
 function Dashboard({ data, monthKey, setMonthKey }) {
-  const { cards, categories, transactions } = data;
+  const { cards, categories, transactions, sueldo, familyMembers } = data;
 
   const cardTotals = useMemo(() => cards.map((card) => {
     let total = 0;
@@ -992,6 +1026,15 @@ function Dashboard({ data, monthKey, setMonthKey }) {
 
   const totalGeneral = cardTotals.reduce((a, c) => a + c.total, 0);
 
+  const totalDolares = useMemo(() => {
+    let t = 0;
+    transactions.filter(tx => tx.currency === "USD").forEach(tx => {
+      const c = getContribution(tx, monthKey);
+      if (c.active) t += tx.montoCuota;
+    });
+    return t;
+  }, [transactions, monthKey]);
+
   const totalFamiliar = useMemo(() => {
     let t = 0;
     transactions.filter(tx => tx.isFamily).forEach(tx => {
@@ -1000,6 +1043,42 @@ function Dashboard({ data, monthKey, setMonthKey }) {
     });
     return t;
   }, [transactions, monthKey]);
+
+  const familyDueThisMonth = useMemo(() => {
+    return familyMembers.map((p) => {
+      let t = 0;
+      transactions.filter(tx => tx.isFamily && tx.familyPersonId === p.id).forEach(tx => {
+        const c = getContribution(tx, monthKey);
+        if (c.active) t += c.monto;
+      });
+      return { person: p, monto: t };
+    }).filter((x) => x.monto > 0).sort((a, b) => b.monto - a.monto);
+  }, [familyMembers, transactions, monthKey]);
+
+  const priceIncreases = useMemo(() => {
+    const groups = {};
+    transactions.filter(tx => (tx.cuotas || 1) === 1 && !tx.isFamily).forEach(tx => {
+      const key = normDesc(tx.description);
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(tx);
+    });
+    const found = [];
+    Object.values(groups).forEach((list) => {
+      if (list.length < 2) return;
+      const sorted = [...list].sort((a, b) => monthsBetweenKeys(a.startMonth, b.startMonth));
+      const last = sorted[sorted.length - 1];
+      const prev = sorted[sorted.length - 2];
+      if (last.currency !== prev.currency) return;
+      const gap = monthsBetweenKeys(prev.startMonth, last.startMonth);
+      if (gap < 1 || gap > 2) return;
+      if (!(prev.montoCuota > 0)) return;
+      const pct = ((last.montoCuota - prev.montoCuota) / prev.montoCuota) * 100;
+      if (pct > 8) {
+        found.push({ description: last.description, prevAmt: prev.montoCuota, lastAmt: last.montoCuota, pct, currency: last.currency });
+      }
+    });
+    return found.sort((a, b) => b.pct - a.pct).slice(0, 6);
+  }, [transactions]);
 
   const totalPersonal = totalGeneral - totalFamiliar;
 
@@ -1067,10 +1146,15 @@ function Dashboard({ data, monthKey, setMonthKey }) {
         <MonthNav monthKey={monthKey} setMonthKey={setMonthKey} />
       </div>
 
-      <div className="ect-grid ect-kpis">
+      <div className="ect-grid ect-kpis" style={{ gridTemplateColumns: "repeat(5, 1fr)" }}>
         <div className="ect-panel">
-          <div className="ect-kpi-label">Total en tarjetas (mes)</div>
+          <div className="ect-kpi-label">Saldo en pesos (mes)</div>
           <div className="ect-kpi-value gold">{fmt(totalGeneral)}</div>
+        </div>
+        <div className="ect-panel">
+          <div className="ect-kpi-label">Saldo en dólares (mes)</div>
+          <div className="ect-kpi-value" style={{ color: totalDolares > 0 ? "var(--blue)" : undefined }}>{fmtUSD(totalDolares)}</div>
+          {totalDolares > 0 && <div className="ect-form-hint" style={{ marginTop: 6 }}>Incluye gastos con y sin tipo de cambio cargado</div>}
         </div>
         <div className="ect-panel">
           <div className="ect-kpi-label">Mi gasto real</div>
@@ -1090,6 +1174,83 @@ function Dashboard({ data, monthKey, setMonthKey }) {
           <div className="ect-kpi-value">{activeInstallments.length}</div>
         </div>
       </div>
+
+      <div className="ect-grid" style={{ gridTemplateColumns: "1fr 1fr", marginBottom: 22 }}>
+        <div className="ect-panel">
+          <div className="ect-section-title">Flujo del mes</div>
+          {(() => {
+            const libre = sueldo - totalGeneral + totalFamiliar;
+            return (
+              <div>
+                <div className="ect-ledger-row">
+                  <span className="ect-ledger-desc">Sueldo</span>
+                  <span className="ect-ledger-dots" />
+                  <span className="ect-ledger-amt" style={{ color: "var(--green)" }}>+{fmt(sueldo)}</span>
+                </div>
+                <div className="ect-ledger-row">
+                  <span className="ect-ledger-desc">Tarjetas (pesos, incluye préstamo)</span>
+                  <span className="ect-ledger-dots" />
+                  <span className="ect-ledger-amt" style={{ color: "var(--red)" }}>-{fmt(totalGeneral)}</span>
+                </div>
+                <div className="ect-ledger-row">
+                  <span className="ect-ledger-desc">A cobrar de familia este mes</span>
+                  <span className="ect-ledger-dots" />
+                  <span className="ect-ledger-amt" style={{ color: "var(--green)" }}>+{fmt(totalFamiliar)}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", borderTop: "1px solid var(--border)", paddingTop: 10, marginTop: 6 }}>
+                  <span style={{ fontWeight: 600, fontSize: 13.5 }}>Disponible libre</span>
+                  <span className="ect-mono" style={{ fontWeight: 700, fontSize: 15, color: libre >= 0 ? "var(--green)" : "var(--red)" }}>{fmt(libre)}</span>
+                </div>
+                {totalDolares > 0 && (
+                  <div className="ect-form-hint" style={{ marginTop: 10 }}>
+                    + tenés {fmtUSD(totalDolares)} en gastos de este mes en dólares (no está incluido arriba porque es otra moneda).
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+        </div>
+
+        <div className="ect-panel">
+          <div className="ect-section-title"><Users size={15} /> A cobrar este mes</div>
+          {familyDueThisMonth.length === 0 ? (
+            <div className="ect-empty">Nadie de la familia tiene gastos activos en {labelOfKey(monthKey)}</div>
+          ) : (
+            <div>
+              {familyDueThisMonth.map(({ person, monto }) => (
+                <div className="ect-ledger-row" key={person.id}>
+                  <span className="ect-ledger-desc">{person.name}</span>
+                  <span className="ect-ledger-dots" />
+                  <span className="ect-ledger-amt">{fmt(monto)}</span>
+                </div>
+              ))}
+              <div style={{ display: "flex", justifyContent: "space-between", borderTop: "1px solid var(--border)", paddingTop: 10, marginTop: 6 }}>
+                <span style={{ fontWeight: 600, fontSize: 13.5 }}>Total</span>
+                <span className="ect-mono" style={{ fontWeight: 700, fontSize: 14, color: "var(--gold)" }}>{fmt(totalFamiliar)}</span>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {priceIncreases.length > 0 && (
+        <div className="ect-panel" style={{ marginBottom: 22 }}>
+          <div className="ect-section-title"><TrendingUp size={15} /> Posibles aumentos detectados <span className="tag">últimos meses</span></div>
+          <table className="ect-table">
+            <thead><tr><th>Gasto</th><th>Antes</th><th>Ahora</th><th style={{ textAlign: "right" }}>Variación</th></tr></thead>
+            <tbody>
+              {priceIncreases.map((p, i) => (
+                <tr key={i}>
+                  <td>{p.description}</td>
+                  <td className="ect-mono" style={{ color: "var(--text-dim)" }}>{p.currency === "USD" ? fmtUSD(p.prevAmt) : fmt(p.prevAmt)}</td>
+                  <td className="ect-mono">{p.currency === "USD" ? fmtUSD(p.lastAmt) : fmt(p.lastAmt)}</td>
+                  <td className="amt" style={{ color: "var(--red)" }}>+{p.pct.toFixed(0)}%</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       <div className="ect-grid" style={{ gridTemplateColumns: "1.3fr 1fr", marginBottom: 22 }}>
         <div className="ect-panel">
@@ -1168,7 +1329,7 @@ function Dashboard({ data, monthKey, setMonthKey }) {
                   <td>{tx.description} <CurrencyTag tx={tx} /> {tx.isFamily && <span className="ect-badge blue" style={{ marginLeft: 6 }}>familiar</span>}</td>
                   <td><span className="ect-dot" style={{ background: card.color, marginRight: 6 }} />{card.name}</td>
                   <td><span className="ect-badge gold">{c.cuotaNum}/{c.total}</span></td>
-                  <td className="amt">{fmt(c.monto)}</td>
+                  <td className="amt">{formatTxMonto(tx)}</td>
                 </tr>
               ))}
             </tbody>
@@ -1256,7 +1417,7 @@ function ExpensesView({ data, monthKey, setMonthKey, onAdd, onEdit, onDelete, on
                   <td><span className="ect-dot" style={{ background: card?.color, marginRight: 6 }} />{card?.name}</td>
                   <td><span className="ect-dot" style={{ background: cat?.color, marginRight: 6 }} />{cat?.name || "Sin categoría"}</td>
                   <td>{tx.cuotas > 1 ? <span className="ect-badge gold">{c.cuotaNum}/{c.total}</span> : <span className="ect-badge">contado</span>}</td>
-                  <td className="amt">{fmt(c.monto)}</td>
+                  <td className="amt">{formatTxMonto(tx)}</td>
                   <td>
                     <div className="row-actions">
                       <button className="ect-icon-btn" onClick={() => { setEditing(tx); setShowForm(true); }}><Pencil size={13} /></button>
@@ -1406,9 +1567,9 @@ function generateFamilyPDF(person, gastos, devs, balance) {
         ensureSpace(8);
         const desc = tx.description.length > 42 ? tx.description.slice(0, 42) + "…" : tx.description;
         const cuotaLabel = tx.cuotas > 1 ? `  (cuota ${c.cuotaNum}/${c.total})` : "";
-        const usdLabel = tx.currency === "USD" ? ` (USD ${tx.amount.toFixed(2)})` : "";
+        const usdLabel = tx.currency === "USD" && hasKnownRate(tx) ? ` (USD ${tx.amount.toFixed(2)})` : "";
         doc.text(desc + cuotaLabel + usdLabel, marginX + 4, y);
-        doc.text(fmt(c.monto), rightX, y, { align: "right" });
+        doc.text(formatTxMonto(tx), rightX, y, { align: "right" });
         y += 6;
       });
       m.repayItems.forEach((r) => {
@@ -1459,9 +1620,10 @@ function FamilyView({ data, monthKey, onAddRepayment, onDeleteRepayment, onAddFa
   const balances = useMemo(() => familyMembers.map(p => {
     const gastos = transactions.filter(tx => tx.isFamily && tx.familyPersonId === p.id);
     const totalGastos = gastos.reduce((a, tx) => a + txTotalARS(tx), 0);
+    const pendingUSD = gastos.filter(tx => tx.currency === "USD" && !hasKnownRate(tx)).reduce((a, tx) => a + tx.amount, 0);
     const devs = repayments.filter(r => r.personId === p.id);
     const totalDevs = devs.reduce((a, r) => a + r.amount, 0);
-    return { person: p, gastos, devs, totalGastos, totalDevs, balance: totalGastos - totalDevs };
+    return { person: p, gastos, devs, totalGastos, totalDevs, pendingUSD, balance: totalGastos - totalDevs };
   }), [familyMembers, transactions, repayments]);
 
   const totalAdeudado = balances.reduce((a, b) => a + b.balance, 0);
@@ -1487,6 +1649,9 @@ function FamilyView({ data, monthKey, onAddRepayment, onDeleteRepayment, onAddFa
             <div className="ect-person-balance" style={{ color: b.balance > 0 ? "var(--red)" : "var(--green)" }}>
               {fmt(b.balance)}
             </div>
+            {b.pendingUSD > 0 && (
+              <div style={{ fontSize: 11.5, color: "var(--blue)", marginTop: 4 }}>+ {fmtUSD(b.pendingUSD)} sin TC</div>
+            )}
             <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginTop: 8 }}>
               {b.gastos.length} gasto(s) · {b.devs.length} devolución(es)
             </div>
@@ -1499,6 +1664,11 @@ function FamilyView({ data, monthKey, onAddRepayment, onDeleteRepayment, onAddFa
 
       {current && (
         <>
+          {current.pendingUSD > 0 && (
+            <div className="ect-form-hint" style={{ marginBottom: 14 }}>
+              {current.person.name} tiene {fmtUSD(current.pendingUSD)} en gastos sin tipo de cambio cargado — ese monto todavía no está incluido en el saldo en pesos. Cargá el TC desde la tarjeta correspondiente cuando lo sepas.
+            </div>
+          )}
           <div className="ect-topbar" style={{ marginTop: 6 }}>
             <div className="ect-section-title" style={{ margin: 0 }}>{current.person.name} — detalle</div>
             <div style={{ display: "flex", gap: 10 }}>
@@ -1533,7 +1703,7 @@ function FamilyView({ data, monthKey, onAddRepayment, onDeleteRepayment, onAddFa
                             <CurrencyTag tx={tx} />
                             {tx.cuotas > 1 && <span className="ect-badge gold">{c.cuotaNum}/{c.total}</span>}
                             <span className="ect-ledger-dots" />
-                            <span className="ect-ledger-amt">{fmt(c.monto)}</span>
+                            <span className="ect-ledger-amt">{formatTxMonto(tx)}</span>
                             <button className="ect-icon-btn del" onClick={() => onDeleteTx(tx.id)}><Trash2 size={12} /></button>
                           </div>
                         );
@@ -1609,6 +1779,22 @@ function FamilyView({ data, monthKey, onAddRepayment, onDeleteRepayment, onAddFa
   );
 }
 
+/* Saldo pendiente de pagar en una tarjeta: suma las cuotas que quedan por
+   vencer (desde el mes indicado en adelante) de todos sus gastos, útil como
+   proxy del cupo ocupado del límite de compra */
+function remainingBalance(transactions, cardId, monthKey) {
+  let total = 0;
+  transactions.filter((tx) => tx.cardId === cardId).forEach((tx) => {
+    const N = tx.cuotas || 1;
+    const idx = monthsBetweenKeys(tx.startMonth, monthKey);
+    const startIdx = Math.max(0, idx);
+    if (startIdx < N) {
+      total += (N - startIdx) * txCuotaARS(tx);
+    }
+  });
+  return total;
+}
+
 /* ============================================================
    CARDS VIEW
    ============================================================ */
@@ -1616,10 +1802,38 @@ function FamilyView({ data, monthKey, onAddRepayment, onDeleteRepayment, onAddFa
 const OWNER_LABEL = { propia: "Propia", novia: "De mi novia" };
 const TYPE_LABEL = { credito: "Crédito", efectivo: "Efectivo/Transf.", prestamo: "Préstamo" };
 
-function CardsView({ data, monthKey, setMonthKey, onUpdateCard, onAddCard, onDeleteCard }) {
+function ApplyRateModal({ card, pendingItems, onClose, onApply }) {
+  const [rate, setRate] = useState("");
+  const totalUSD = pendingItems.reduce((a, x) => a + x.tx.montoCuota, 0);
+  return (
+    <Modal title={`Aplicar tipo de cambio — ${card.name}`} onClose={onClose} width={420}>
+      <div className="ect-form-hint" style={{ marginBottom: 14 }}>
+        Se va a aplicar a {pendingItems.length} gasto(s) en dólares sin tipo de cambio cargado
+        (US$ {totalUSD.toFixed(2)} en total, activos en {labelOfKey(card.__monthKey || "")}).
+      </div>
+      <div className="ect-form-row">
+        <label>Tipo de cambio (ARS por USD)</label>
+        <input type="number" step="0.01" min="0" value={rate} onChange={(e) => setRate(e.target.value)} autoFocus placeholder="Ej: 1250.00" />
+      </div>
+      <div className="ect-modal-actions">
+        <button className="ect-btn secondary" onClick={onClose}>Cancelar</button>
+        <button
+          className="ect-btn"
+          disabled={!(Number(rate) > 0)}
+          onClick={() => onApply(pendingItems.map((x) => x.tx.id), Number(rate))}
+        >
+          <Check size={14} /> Aplicar a {pendingItems.length} gasto(s)
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+function CardsView({ data, monthKey, setMonthKey, onUpdateCard, onAddCard, onDeleteCard, onApplyRate }) {
   const { cards, transactions } = data;
   const [editingCard, setEditingCard] = useState(null);
   const [showNew, setShowNew] = useState(false);
+  const [applyRateCard, setApplyRateCard] = useState(null);
 
   return (
     <div>
@@ -1635,6 +1849,11 @@ function CardsView({ data, monthKey, setMonthKey, onUpdateCard, onAddCard, onDel
         {cards.map(card => {
           const txs = transactions.filter(t => t.cardId === card.id).map(tx => ({ tx, c: getContribution(tx, monthKey) })).filter(x => x.c.active);
           const total = txs.reduce((a, x) => a + x.c.monto, 0);
+          const pendingUSD = txs.filter((x) => x.tx.currency === "USD" && !hasKnownRate(x.tx));
+          const pendingUSDTotal = pendingUSD.reduce((a, x) => a + x.tx.montoCuota, 0);
+          const used = card.limite > 0 ? remainingBalance(transactions, card.id, monthKey) : 0;
+          const pct = card.limite > 0 ? Math.min(100, (used / card.limite) * 100) : null;
+          const barColor = pct === null ? "var(--border)" : pct >= 90 ? "var(--red)" : pct >= 70 ? "#C99A3E" : "var(--green)";
           return (
             <div className="ect-panel" key={card.id}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
@@ -1652,7 +1871,28 @@ function CardsView({ data, monthKey, setMonthKey, onUpdateCard, onAddCard, onDel
                   <button className="ect-icon-btn del" onClick={() => onDeleteCard(card.id)}><Trash2 size={13} /></button>
                 </div>
               </div>
-              <div className="ect-kpi-value" style={{ fontSize: 20, marginBottom: 10 }}>{fmt(total)}</div>
+              <div className="ect-kpi-value" style={{ fontSize: 20, marginBottom: 4 }}>{fmt(total)}</div>
+
+              {card.limite > 0 && (
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ height: 6, borderRadius: 4, background: "var(--surface)", overflow: "hidden", marginBottom: 5 }}>
+                    <div style={{ height: "100%", width: `${pct}%`, background: barColor, borderRadius: 4, transition: "width .2s" }} />
+                  </div>
+                  <div style={{ fontSize: 11.5, color: "var(--text-dim)" }}>
+                    Disponible: <span style={{ color: "var(--text)", fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(Math.max(0, card.limite - used))}</span> de {fmt(card.limite)}
+                  </div>
+                </div>
+              )}
+
+              {pendingUSD.length > 0 && (
+                <div className="ect-toggle-row" style={{ marginBottom: 12, padding: "8px 12px" }}>
+                  <span style={{ fontSize: 12 }}>US$ {pendingUSDTotal.toFixed(2)} sin tipo de cambio</span>
+                  <button className="ect-btn ghost sm" onClick={() => setApplyRateCard({ ...card, __monthKey: monthKey })}>
+                    <RefreshCw size={12} /> Aplicar TC
+                  </button>
+                </div>
+              )}
+
               {txs.length === 0 ? (
                 <div className="ect-empty" style={{ padding: 14 }}>Sin movimientos en {labelOfKey(monthKey)}</div>
               ) : (
@@ -1663,7 +1903,7 @@ function CardsView({ data, monthKey, setMonthKey, onUpdateCard, onAddCard, onDel
                       <CurrencyTag tx={tx} />
                       {tx.cuotas > 1 && <span className="ect-badge gold">{c.cuotaNum}/{c.total}</span>}
                       <span className="ect-ledger-dots" />
-                      <span className="ect-ledger-amt">{fmt(c.monto)}</span>
+                      <span className="ect-ledger-amt">{formatTxMonto(tx)}</span>
                     </div>
                   ))}
                   {txs.length > 6 && <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginTop: 6 }}>+{txs.length - 6} más — ver en Gastos</div>}
@@ -1681,6 +1921,21 @@ function CardsView({ data, monthKey, setMonthKey, onUpdateCard, onAddCard, onDel
           onSave={(card) => { editingCard ? onUpdateCard(card) : onAddCard(card); setEditingCard(null); setShowNew(false); }}
         />
       )}
+
+      {applyRateCard && (() => {
+        const pendingItems = transactions
+          .filter((tx) => tx.cardId === applyRateCard.id)
+          .map((tx) => ({ tx, c: getContribution(tx, applyRateCard.__monthKey) }))
+          .filter((x) => x.c.active && x.tx.currency === "USD" && !hasKnownRate(x.tx));
+        return (
+          <ApplyRateModal
+            card={applyRateCard}
+            pendingItems={pendingItems}
+            onClose={() => setApplyRateCard(null)}
+            onApply={(ids, rate) => { onApplyRate(ids, rate); setApplyRateCard(null); }}
+          />
+        );
+      })()}
     </div>
   );
 }
@@ -1691,6 +1946,7 @@ function CardForm({ initial, onSave, onClose }) {
   const [owner, setOwner] = useState(initial?.owner || "propia");
   const [closingDay, setClosingDay] = useState(initial?.closingDay || 1);
   const [color, setColor] = useState(initial?.color || "#C9A15D");
+  const [limite, setLimite] = useState(initial?.limite || "");
 
   return (
     <Modal title={initial ? "Editar medio de pago" : "Nuevo medio de pago"} onClose={onClose} width={420}>
@@ -1725,12 +1981,19 @@ function CardForm({ initial, onSave, onClose }) {
           <input type="color" value={color} onChange={(e) => setColor(e.target.value)} style={{ height: 38, padding: 4 }} />
         </div>
       </div>
+      {type === "credito" && (
+        <div className="ect-form-row">
+          <label>Límite de compra (opcional)</label>
+          <input type="number" min="0" step="1" value={limite} onChange={(e) => setLimite(e.target.value)} placeholder="Ej: 900000" />
+          <div className="ect-form-hint">Si lo cargás, vas a ver cuánto te queda disponible en cada tarjeta.</div>
+        </div>
+      )}
       <div className="ect-modal-actions">
         <button className="ect-btn secondary" onClick={onClose}>Cancelar</button>
         <button
           className="ect-btn"
           disabled={!name.trim()}
-          onClick={() => onSave({ id: initial?.id || uid(), name: name.trim(), type, owner, closingDay: Number(closingDay), color })}
+          onClick={() => onSave({ id: initial?.id || uid(), name: name.trim(), type, owner, closingDay: Number(closingDay), color, limite: Number(limite) || 0 })}
         >
           <Check size={14} /> Guardar
         </button>
@@ -2156,10 +2419,12 @@ export default function App() {
         const migrated = {
           ...emptyData(),
           ...parsed,
+          cards: ensureCardDefaults(parsed.cards || SEED_CARDS),
           categories: ensureCargosCategory(parsed.categories || SEED_CATEGORIES),
           transactions: (parsed.transactions || []).map((tx) => migrateTransaction(tx, parsed.cards || SEED_CARDS)),
           sueldo: parsed.sueldo ?? 2000000,
           descriptionMappings: parsed.descriptionMappings || {},
+          lastBackupAt: parsed.lastBackupAt || null,
         };
         setData(migrated);
       } else {
@@ -2241,6 +2506,11 @@ export default function App() {
   const addCard = (card) => setData(d => ({ ...d, cards: [...d.cards, card] }));
   const deleteCard = (id) => setData(d => ({ ...d, cards: d.cards.filter(c => c.id !== id) }));
 
+  const applyRateToTransactions = (txIds, rate) => setData((d) => ({
+    ...d,
+    transactions: d.transactions.map((tx) => (txIds.includes(tx.id) ? { ...tx, exchangeRate: rate } : tx)),
+  }));
+
   const updateSalary = (val) => setData(d => ({ ...d, sueldo: val }));
 
   const lookupMapping = (rawDescription) => data.descriptionMappings[normDesc(rawDescription)] || null;
@@ -2258,6 +2528,7 @@ export default function App() {
     a.download = `el-cierre-backup-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
     URL.revokeObjectURL(url);
+    setData((d) => ({ ...d, lastBackupAt: new Date().toISOString() }));
   };
 
   const importBackup = (e) => {
@@ -2271,10 +2542,12 @@ export default function App() {
           setData({
             ...emptyData(),
             ...parsed,
+            cards: ensureCardDefaults(parsed.cards || SEED_CARDS),
             categories: ensureCargosCategory(parsed.categories || SEED_CATEGORIES),
             transactions: (parsed.transactions || []).map((tx) => migrateTransaction(tx, parsed.cards || SEED_CARDS)),
             sueldo: parsed.sueldo ?? 2000000,
             descriptionMappings: parsed.descriptionMappings || {},
+            lastBackupAt: parsed.lastBackupAt || null,
           });
           alert("Backup importado correctamente.");
         } else {
@@ -2296,6 +2569,11 @@ export default function App() {
     { id: "tarjetas", label: "Tarjetas", icon: CreditCard },
     { id: "categorias", label: "Categorías", icon: Tag },
   ];
+
+  const daysSinceBackup = data.lastBackupAt
+    ? Math.floor((Date.now() - new Date(data.lastBackupAt).getTime()) / 86400000)
+    : null;
+  const showBackupReminder = data.transactions.length > 0 && (daysSinceBackup === null || daysSinceBackup >= 14);
 
   return (
     <div className="ect-root">
@@ -2324,6 +2602,18 @@ export default function App() {
       </div>
 
       <div className="ect-main">
+        {showBackupReminder && (
+          <div className="ect-backup-banner">
+            <BellRing size={15} />
+            <span>
+              {daysSinceBackup === null
+                ? "Todavía no exportaste ningún backup de tus datos."
+                : `Hace ${daysSinceBackup} días que no exportás un backup.`}
+              {" "}Como todo se guarda solo en este navegador, te conviene exportarlo de vez en cuando.
+            </span>
+            <button className="ect-btn sm" style={{ marginLeft: "auto", flexShrink: 0 }} onClick={exportBackup}>Exportar ahora</button>
+          </div>
+        )}
         {tab === "dashboard" && <Dashboard data={data} monthKey={monthKey} setMonthKey={setMonthKey} />}
         {tab === "gastos" && (
           <ExpensesView
@@ -2347,6 +2637,7 @@ export default function App() {
           <CardsView
             data={data} monthKey={monthKey} setMonthKey={setMonthKey}
             onUpdateCard={updateCard} onAddCard={addCard} onDeleteCard={deleteCard}
+            onApplyRate={applyRateToTransactions}
           />
         )}
         {tab === "categorias" && (

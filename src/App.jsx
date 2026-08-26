@@ -7,7 +7,8 @@ import {
   LayoutDashboard, Receipt, Users, CreditCard, Tag, Plus, X, Pencil, Trash2,
   ChevronLeft, ChevronRight, Check, ArrowDownCircle, ArrowUpCircle, Layers,
   CalendarClock, FileDown, UploadCloud, AlertTriangle, FileText, Loader2,
-  TrendingUp, TrendingDown, RefreshCw, BellRing, DollarSign
+  TrendingUp, TrendingDown, RefreshCw, BellRing, DollarSign, Sun, Moon,
+  Search, Lock, Unlock, FileSpreadsheet, Copy
 } from "lucide-react";
 import jsPDF from "jspdf";
 
@@ -119,6 +120,15 @@ function formatTxMonto(tx) {
   return fmt(txCuotaARS(tx));
 }
 
+/* Igual que formatTxMonto pero con el monto TOTAL de la compra (no la cuota),
+   usado en la vista de rango de fechas personalizado */
+function formatTxTotalMonto(tx) {
+  if (tx.currency === "USD" && !hasKnownRate(tx)) {
+    return `${fmtUSD(tx.amount)} (TC pend.)`;
+  }
+  return fmt(txTotalARS(tx));
+}
+
 /* Contribución de una transacción a un mes de resumen puntual (targetKey),
    usando el startMonth ya calculado/guardado en la transacción */
 function getContribution(tx, targetKey) {
@@ -151,14 +161,14 @@ function migrateTransaction(tx, cards) {
    ============================================================ */
 
 const SEED_CARDS = [
-  { id: "naranjax", name: "Naranja X", type: "credito", owner: "propia", closingDay: 19, color: "#C9A15D", limite: 0 },
-  { id: "mc-naranjax", name: "Mastercard Naranja X", type: "credito", owner: "propia", closingDay: 19, color: "#8C7A5B", limite: 0 },
-  { id: "cabal-credicoop", name: "CABAL Credicoop", type: "credito", owner: "propia", closingDay: 8, color: "#6E8FBF", limite: 0 },
-  { id: "visa-credicoop", name: "VISA Credicoop", type: "credito", owner: "propia", closingDay: 8, color: "#BD5C48", limite: 0 },
-  { id: "visa-bbva", name: "VISA BBVA (novia)", type: "credito", owner: "novia", closingDay: 12, color: "#7F9C6E", limite: 0 },
-  { id: "visa-galicia", name: "VISA Galicia (novia)", type: "credito", owner: "novia", closingDay: 6, color: "#A87FBF", limite: 0 },
-  { id: "prestamo-mp", name: "Préstamo MercadoPago", type: "prestamo", owner: "propia", closingDay: 16, color: "#5C9C6E", limite: 0 },
-  { id: "efectivo", name: "Efectivo / Transferencia", type: "efectivo", owner: "propia", closingDay: 1, color: "#9AA1B8", limite: 0 },
+  { id: "naranjax", name: "Naranja X", type: "credito", owner: "propia", closingDay: 19, vencimientoDay: 10, color: "#C9A15D", limite: 0 },
+  { id: "mc-naranjax", name: "Mastercard Naranja X", type: "credito", owner: "propia", closingDay: 19, vencimientoDay: 10, color: "#8C7A5B", limite: 0 },
+  { id: "cabal-credicoop", name: "CABAL Credicoop", type: "credito", owner: "propia", closingDay: 8, vencimientoDay: 15, color: "#6E8FBF", limite: 0 },
+  { id: "visa-credicoop", name: "VISA Credicoop", type: "credito", owner: "propia", closingDay: 8, vencimientoDay: 15, color: "#BD5C48", limite: 0 },
+  { id: "visa-bbva", name: "VISA BBVA (novia)", type: "credito", owner: "novia", closingDay: 12, vencimientoDay: 20, color: "#7F9C6E", limite: 0 },
+  { id: "visa-galicia", name: "VISA Galicia (novia)", type: "credito", owner: "novia", closingDay: 6, vencimientoDay: 14, color: "#A87FBF", limite: 0 },
+  { id: "prestamo-mp", name: "Préstamo MercadoPago", type: "prestamo", owner: "propia", closingDay: 16, vencimientoDay: 16, color: "#5C9C6E", limite: 0 },
+  { id: "efectivo", name: "Efectivo / Transferencia", type: "efectivo", owner: "propia", closingDay: 1, vencimientoDay: 1, color: "#9AA1B8", limite: 0 },
 ];
 
 const SEED_CATEGORIES = [
@@ -191,11 +201,12 @@ const emptyData = () => ({
   sueldo: 2000000,
   descriptionMappings: {},
   lastBackupAt: null,
+  theme: "dark",
 });
 
-/* Asegura que tarjetas guardadas antes de esta versión tengan el campo límite */
+/* Asegura que tarjetas guardadas antes de esta versión tengan los campos nuevos */
 function ensureCardDefaults(cards) {
-  return cards.map((c) => ({ limite: 0, ...c }));
+  return cards.map((c) => ({ limite: 0, vencimientoDay: c.closingDay, ...c }));
 }
 
 /* ============================================================
@@ -217,6 +228,7 @@ const GlobalStyle = () => (
       --green: #5C9C6E;
       --red: #BD5C48;
       --blue: #6E8FBF;
+      --btn-text: #1B1408;
       font-family: 'Inter', sans-serif;
       background: var(--bg);
       color: var(--text);
@@ -224,8 +236,22 @@ const GlobalStyle = () => (
       min-height: 100vh;
       display: flex;
       box-sizing: border-box;
+      transition: background .15s, color .15s;
     }
-    .ect-root * { box-sizing: border-box; }
+    .ect-root.ect-light {
+      --bg: #F6F1E6;
+      --surface: #FFFFFF;
+      --surface-2: #EFE8D6;
+      --border: #DED0AF;
+      --text: #241F14;
+      --text-dim: #746A54;
+      --gold: #9C6C24;
+      --green: #2F7248;
+      --red: #A03F2B;
+      --blue: #3D5F8F;
+      --btn-text: #FBF4E4;
+    }
+    .ect-root * { box-sizing: border-box; transition: background .15s, border-color .15s, color .15s; }
     .ect-mono { font-family: 'IBM Plex Mono', monospace; font-variant-numeric: tabular-nums; }
     .ect-display { font-family: 'Fraunces', serif; }
 
@@ -344,7 +370,7 @@ const GlobalStyle = () => (
       align-items: center;
       gap: 6px;
       background: var(--gold);
-      color: #1B1408;
+      color: var(--btn-text);
       border: none;
       padding: 9px 16px;
       border-radius: 7px;
@@ -599,7 +625,7 @@ const GlobalStyle = () => (
       width: 17px; height: 17px; border-radius: 50%;
       background: var(--text); transition: left .15s;
     }
-    .ect-switch.on .knob { left: 19px; background: #1B1408; }
+    .ect-switch.on .knob { left: 19px; background: var(--btn-text); }
     .ect-modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
     .ect-inline-add { display: flex; gap: 8px; margin-top: 8px; }
     .ect-color-swatch {
@@ -728,6 +754,59 @@ function CurrencyTag({ tx }) {
   return <span className="ect-badge blue" title={`USD ${tx.amount.toFixed(2)} · TC ${tx.exchangeRate}`}>USD</span>;
 }
 
+/* Cotización del dólar de referencia (dolarapi.com — pública, sin key).
+   Requiere conexión a internet; falla en silencio si no hay red. */
+function useDolarRates() {
+  const [rates, setRates] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  const fetchRates = () => {
+    setLoading(true);
+    setError(null);
+    fetch("https://dolarapi.com/v1/dolares")
+      .then((res) => {
+        if (!res.ok) throw new Error("bad response");
+        return res.json();
+      })
+      .then((json) => setRates(Array.isArray(json) ? json : null))
+      .catch(() => setError("No se pudo obtener la cotización (¿sin conexión?)."))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => { fetchRates(); }, []);
+  return { rates, loading, error, refetch: fetchRates };
+}
+
+function DolarWidget({ compact }) {
+  const { rates, loading, error, refetch } = useDolarRates();
+  const wanted = ["oficial", "blue", "tarjeta"];
+  const found = rates ? wanted.map((casa) => rates.find((r) => r.casa === casa)).filter(Boolean) : [];
+
+  return (
+    <div className="ect-panel" style={compact ? { padding: "14px 18px" } : undefined}>
+      <div className="ect-section-title" style={{ marginBottom: compact ? 10 : 16 }}>
+        <DollarSign size={15} /> Cotización del dólar
+        <button className="ect-icon-btn" style={{ marginLeft: "auto" }} onClick={refetch} title="Actualizar">
+          <RefreshCw size={12} className={loading ? "ect-spin" : ""} />
+        </button>
+      </div>
+      {error && <div className="ect-form-hint" style={{ color: "var(--red)" }}>{error}</div>}
+      {!error && loading && !rates && <div className="ect-form-hint">Consultando...</div>}
+      {!error && found.length > 0 && (
+        <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
+          {found.map((r) => (
+            <div key={r.casa}>
+              <div style={{ fontSize: 10.5, textTransform: "uppercase", letterSpacing: 0.6, color: "var(--text-dim)" }}>{r.nombre}</div>
+              <div className="ect-mono" style={{ fontSize: 15, fontWeight: 600 }}>{fmt(r.venta)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ============================================================
    TRANSACTION FORM (gasto personal o familiar)
    ============================================================ */
@@ -753,6 +832,8 @@ function TransactionForm({ initial, cards, categories, familyMembers, allTransac
   });
   const [esFamiliar, setEsFamiliar] = useState(!!initial?.isFamily);
   const [familyPersonId, setFamilyPersonId] = useState(initial?.familyPersonId || familyMembers[0]?.id || "");
+  const { rates: dolarRatesRaw } = useDolarRates();
+  const dolarRates = dolarRatesRaw ? ["oficial", "blue", "tarjeta"].map((c) => dolarRatesRaw.find((r) => r.casa === c)).filter(Boolean) : null;
   const [newCatName, setNewCatName] = useState("");
   const [newPersonName, setNewPersonName] = useState("");
   const [showNewCat, setShowNewCat] = useState(false);
@@ -852,6 +933,22 @@ function TransactionForm({ initial, cards, categories, familyMembers, allTransac
             <div className="ect-form-hint">Equivale a {fmt(totalARS)}</div>
           ) : (
             <div className="ect-form-hint">Sin tipo de cambio, este gasto se va a trackear en dólares hasta que lo completes (por ejemplo cuando pagues el resumen).</div>
+          )}
+          {dolarRates && dolarRates.length > 0 && (
+            <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+              {dolarRates.map((r) => (
+                <button
+                  key={r.casa}
+                  type="button"
+                  className="ect-badge"
+                  style={{ cursor: "pointer" }}
+                  onClick={() => setExchangeRate(String(r.venta))}
+                  title="Usar esta cotización"
+                >
+                  {r.nombre}: {r.venta}
+                </button>
+              ))}
+            </div>
           )}
         </div>
       )}
@@ -1175,6 +1272,10 @@ function Dashboard({ data, monthKey, setMonthKey }) {
         </div>
       </div>
 
+      <div style={{ marginBottom: 22 }}>
+        <DolarWidget compact />
+      </div>
+
       <div className="ect-grid" style={{ gridTemplateColumns: "1fr 1fr", marginBottom: 22 }}>
         <div className="ect-panel">
           <div className="ect-section-title">Flujo del mes</div>
@@ -1351,19 +1452,34 @@ function ExpensesView({ data, monthKey, setMonthKey, onAdd, onEdit, onDelete, on
   const [filterFamily, setFilterFamily] = useState("all");
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState(null);
+  const [viewMode, setViewMode] = useState("mes");
+  const [rangeFrom, setRangeFrom] = useState(() => { const d = new Date(); d.setDate(1); return d.toISOString().slice(0, 10); });
+  const [rangeTo, setRangeTo] = useState(() => new Date().toISOString().slice(0, 10));
 
   const rows = useMemo(() => {
-    return transactions.map(tx => {
-      const card = cards.find(c => c.id === tx.cardId);
-      const cat = categories.find(c => c.id === tx.categoryId);
-      const c = getContribution(tx, monthKey);
-      return { tx, card, cat, c };
-    }).filter(r => r.c.active)
+    let base;
+    if (viewMode === "rango") {
+      base = transactions
+        .filter((tx) => tx.date >= rangeFrom && tx.date <= rangeTo)
+        .map((tx) => {
+          const card = cards.find(c => c.id === tx.cardId);
+          const cat = categories.find(c => c.id === tx.categoryId);
+          return { tx, card, cat, c: { active: true, cuotaNum: null, total: tx.cuotas || 1, monto: txTotalARS(tx) } };
+        });
+    } else {
+      base = transactions.map(tx => {
+        const card = cards.find(c => c.id === tx.cardId);
+        const cat = categories.find(c => c.id === tx.categoryId);
+        const c = getContribution(tx, monthKey);
+        return { tx, card, cat, c };
+      }).filter(r => r.c.active);
+    }
+    return base
       .filter(r => filterCard === "all" || r.tx.cardId === filterCard)
       .filter(r => filterCat === "all" || r.tx.categoryId === filterCat)
       .filter(r => filterFamily === "all" || (filterFamily === "familiar" ? r.tx.isFamily : !r.tx.isFamily))
       .sort((a, b) => new Date(b.tx.date) - new Date(a.tx.date));
-  }, [transactions, cards, categories, monthKey, filterCard, filterCat, filterFamily]);
+  }, [transactions, cards, categories, monthKey, filterCard, filterCat, filterFamily, viewMode, rangeFrom, rangeTo]);
 
   const total = rows.reduce((a, r) => a + r.c.monto, 0);
 
@@ -1372,10 +1488,40 @@ function ExpensesView({ data, monthKey, setMonthKey, onAdd, onEdit, onDelete, on
       <div className="ect-topbar">
         <div className="ect-page-title">Gastos</div>
         <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-          <MonthNav monthKey={monthKey} setMonthKey={setMonthKey} />
+          <div className="ect-month-nav" style={{ padding: 4 }}>
+            <button
+              className={`ect-btn ${viewMode === "mes" ? "" : "ghost"} sm`}
+              style={{ border: "none" }}
+              onClick={() => setViewMode("mes")}
+            >
+              Mes de resumen
+            </button>
+            <button
+              className={`ect-btn ${viewMode === "rango" ? "" : "ghost"} sm`}
+              style={{ border: "none" }}
+              onClick={() => setViewMode("rango")}
+            >
+              Rango de fechas
+            </button>
+          </div>
+          {viewMode === "mes" ? (
+            <MonthNav monthKey={monthKey} setMonthKey={setMonthKey} />
+          ) : (
+            <div className="ect-month-nav">
+              <input type="date" value={rangeFrom} onChange={(e) => setRangeFrom(e.target.value)} style={{ background: "transparent", border: "none", color: "var(--text)", fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5 }} />
+              <span style={{ color: "var(--text-dim)" }}>—</span>
+              <input type="date" value={rangeTo} onChange={(e) => setRangeTo(e.target.value)} style={{ background: "transparent", border: "none", color: "var(--text)", fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5 }} />
+            </div>
+          )}
           <button className="ect-btn" onClick={() => { setEditing(null); setShowForm(true); }}><Plus size={15} /> Nuevo gasto</button>
         </div>
       </div>
+
+      {viewMode === "rango" && (
+        <div className="ect-form-hint" style={{ marginBottom: 12 }}>
+          Mostrando el monto total de cada compra por su fecha real (no dividido por cuota), útil para viajes o análisis puntuales que cruzan varios meses de resumen.
+        </div>
+      )}
 
       <div className="ect-filters">
         <select className="ect-select" value={filterCard} onChange={(e) => setFilterCard(e.target.value)}>
@@ -1398,7 +1544,7 @@ function ExpensesView({ data, monthKey, setMonthKey, onAdd, onEdit, onDelete, on
 
       <div className="ect-panel">
         {rows.length === 0 ? (
-          <div className="ect-empty">No hay gastos que coincidan con el filtro en {labelOfKey(monthKey)}</div>
+          <div className="ect-empty">No hay gastos que coincidan con el filtro {viewMode === "mes" ? `en ${labelOfKey(monthKey)}` : "en ese rango de fechas"}</div>
         ) : (
           <table className="ect-table">
             <thead>
@@ -1416,8 +1562,8 @@ function ExpensesView({ data, monthKey, setMonthKey, onAdd, onEdit, onDelete, on
                   </span>}</td>
                   <td><span className="ect-dot" style={{ background: card?.color, marginRight: 6 }} />{card?.name}</td>
                   <td><span className="ect-dot" style={{ background: cat?.color, marginRight: 6 }} />{cat?.name || "Sin categoría"}</td>
-                  <td>{tx.cuotas > 1 ? <span className="ect-badge gold">{c.cuotaNum}/{c.total}</span> : <span className="ect-badge">contado</span>}</td>
-                  <td className="amt">{formatTxMonto(tx)}</td>
+                  <td>{tx.cuotas > 1 ? <span className="ect-badge gold">{c.cuotaNum ? `${c.cuotaNum}/${c.total}` : `${c.total} cuotas`}</span> : <span className="ect-badge">contado</span>}</td>
+                  <td className="amt">{viewMode === "rango" ? formatTxTotalMonto(tx) : formatTxMonto(tx)}</td>
                   <td>
                     <div className="row-actions">
                       <button className="ect-icon-btn" onClick={() => { setEditing(tx); setShowForm(true); }}><Pencil size={13} /></button>
@@ -1845,6 +1991,37 @@ function CardsView({ data, monthKey, setMonthKey, onUpdateCard, onAddCard, onDel
         </div>
       </div>
 
+      <div className="ect-panel" style={{ marginBottom: 22 }}>
+        <div className="ect-section-title"><CalendarClock size={15} /> Fechas clave</div>
+        <table className="ect-table">
+          <thead><tr><th>Tarjeta</th><th>Día de cierre</th><th>Día de vencimiento</th><th>Próximo vencimiento</th></tr></thead>
+          <tbody>
+            {cards.filter(c => c.type !== "efectivo").map((card) => {
+              const today = new Date();
+              const y = today.getFullYear(), m = today.getMonth() + 1, d = today.getDate();
+              let vy = y, vm = m;
+              if (d > card.vencimientoDay) { vm += 1; if (vm > 12) { vm = 1; vy += 1; } }
+              const nextVto = new Date(vy, vm - 1, card.vencimientoDay);
+              const daysLeft = Math.ceil((nextVto - today) / 86400000);
+              return (
+                <tr key={card.id}>
+                  <td><span className="ect-dot" style={{ background: card.color, marginRight: 6 }} />{card.name}</td>
+                  <td className="ect-mono">{card.closingDay}</td>
+                  <td className="ect-mono">{card.vencimientoDay}</td>
+                  <td className="amt">
+                    {nextVto.toLocaleDateString("es-AR", { day: "2-digit", month: "short" })}
+                    {" "}
+                    <span className="ect-badge" style={daysLeft <= 5 ? { color: "var(--red)", borderColor: "var(--red)" } : undefined}>
+                      {daysLeft === 0 ? "hoy" : daysLeft === 1 ? "mañana" : `en ${daysLeft} días`}
+                    </span>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
       <div className="ect-grid" style={{ gridTemplateColumns: "repeat(2, 1fr)" }}>
         {cards.map(card => {
           const txs = transactions.filter(t => t.cardId === card.id).map(tx => ({ tx, c: getContribution(tx, monthKey) })).filter(x => x.c.active);
@@ -1862,7 +2039,7 @@ function CardsView({ data, monthKey, setMonthKey, onUpdateCard, onAddCard, onDel
                   <div>
                     <div style={{ fontWeight: 600, fontSize: 14.5 }}>{card.name}</div>
                     <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 2 }}>
-                      {TYPE_LABEL[card.type]} · {OWNER_LABEL[card.owner]} · cierre día {card.closingDay}
+                      {TYPE_LABEL[card.type]} · {OWNER_LABEL[card.owner]} · cierre día {card.closingDay} · vence día {card.vencimientoDay}
                     </div>
                   </div>
                 </div>
@@ -1945,6 +2122,7 @@ function CardForm({ initial, onSave, onClose }) {
   const [type, setType] = useState(initial?.type || "credito");
   const [owner, setOwner] = useState(initial?.owner || "propia");
   const [closingDay, setClosingDay] = useState(initial?.closingDay || 1);
+  const [vencimientoDay, setVencimientoDay] = useState(initial?.vencimientoDay || initial?.closingDay || 10);
   const [color, setColor] = useState(initial?.color || "#C9A15D");
   const [limite, setLimite] = useState(initial?.limite || "");
 
@@ -1977,23 +2155,28 @@ function CardForm({ initial, onSave, onClose }) {
           <input type="number" min="1" max="31" value={closingDay} onChange={(e) => setClosingDay(e.target.value)} />
         </div>
         <div className="ect-form-row">
+          <label>Día de vencimiento de pago</label>
+          <input type="number" min="1" max="31" value={vencimientoDay} onChange={(e) => setVencimientoDay(e.target.value)} />
+        </div>
+      </div>
+      <div className="ect-form-2col">
+        <div className="ect-form-row">
           <label>Color</label>
           <input type="color" value={color} onChange={(e) => setColor(e.target.value)} style={{ height: 38, padding: 4 }} />
         </div>
+        {type === "credito" && (
+          <div className="ect-form-row">
+            <label>Límite de compra (opcional)</label>
+            <input type="number" min="0" step="1" value={limite} onChange={(e) => setLimite(e.target.value)} placeholder="Ej: 900000" />
+          </div>
+        )}
       </div>
-      {type === "credito" && (
-        <div className="ect-form-row">
-          <label>Límite de compra (opcional)</label>
-          <input type="number" min="0" step="1" value={limite} onChange={(e) => setLimite(e.target.value)} placeholder="Ej: 900000" />
-          <div className="ect-form-hint">Si lo cargás, vas a ver cuánto te queda disponible en cada tarjeta.</div>
-        </div>
-      )}
       <div className="ect-modal-actions">
         <button className="ect-btn secondary" onClick={onClose}>Cancelar</button>
         <button
           className="ect-btn"
           disabled={!name.trim()}
-          onClick={() => onSave({ id: initial?.id || uid(), name: name.trim(), type, owner, closingDay: Number(closingDay), color, limite: Number(limite) || 0 })}
+          onClick={() => onSave({ id: initial?.id || uid(), name: name.trim(), type, owner, closingDay: Number(closingDay), vencimientoDay: Number(vencimientoDay), color, limite: Number(limite) || 0 })}
         >
           <Check size={14} /> Guardar
         </button>
@@ -2425,6 +2608,7 @@ export default function App() {
           sueldo: parsed.sueldo ?? 2000000,
           descriptionMappings: parsed.descriptionMappings || {},
           lastBackupAt: parsed.lastBackupAt || null,
+          theme: parsed.theme === "light" ? "light" : "dark",
         };
         setData(migrated);
       } else {
@@ -2512,6 +2696,7 @@ export default function App() {
   }));
 
   const updateSalary = (val) => setData(d => ({ ...d, sueldo: val }));
+  const toggleTheme = () => setData(d => ({ ...d, theme: d.theme === "light" ? "dark" : "light" }));
 
   const lookupMapping = (rawDescription) => data.descriptionMappings[normDesc(rawDescription)] || null;
   const upsertMapping = (rawDescription, info) => {
@@ -2548,6 +2733,7 @@ export default function App() {
             sueldo: parsed.sueldo ?? 2000000,
             descriptionMappings: parsed.descriptionMappings || {},
             lastBackupAt: parsed.lastBackupAt || null,
+            theme: parsed.theme === "light" ? "light" : "dark",
           });
           alert("Backup importado correctamente.");
         } else {
@@ -2576,10 +2762,15 @@ export default function App() {
   const showBackupReminder = data.transactions.length > 0 && (daysSinceBackup === null || daysSinceBackup >= 14);
 
   return (
-    <div className="ect-root">
+    <div className={`ect-root ${data.theme === "light" ? "ect-light" : ""}`}>
       <GlobalStyle />
       <div className="ect-sidebar">
-        <div className="ect-brand">El Cierre</div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+          <div className="ect-brand">El Cierre</div>
+          <button className="ect-icon-btn" onClick={toggleTheme} title="Cambiar tema" style={{ marginTop: 2 }}>
+            {data.theme === "light" ? <Moon size={13} /> : <Sun size={13} />}
+          </button>
+        </div>
         <div className="ect-brand-sub">Control de gastos</div>
         {NAV.map(item => (
           <div key={item.id} className={`ect-nav-item ${tab === item.id ? "active" : ""}`} onClick={() => setTab(item.id)}>

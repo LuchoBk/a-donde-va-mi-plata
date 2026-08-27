@@ -1077,12 +1077,18 @@ function TransactionForm({ initial, cards, categories, familyMembers, allTransac
   );
 }
 
-function RepaymentForm({ person, onSave, onClose }) {
-  const [amount, setAmount] = useState("");
+function RepaymentForm({ person, balance, onSave, onClose }) {
+  const [amount, setAmount] = useState(balance > 0 ? String(balance) : "");
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [note, setNote] = useState("");
   return (
     <Modal title={`Registrar devolución — ${person.name}`} onClose={onClose} width={420}>
+      {balance > 0 && (
+        <div className="ect-toggle-row" style={{ padding: "9px 13px" }}>
+          <span style={{ fontSize: 12.5 }}>Debe {fmt(balance)} en total</span>
+          <button type="button" className="ect-btn ghost sm" onClick={() => setAmount(String(balance))}>Saldar todo</button>
+        </div>
+      )}
       <div className="ect-form-2col">
         <div className="ect-form-row">
           <label>Monto (ARS)</label>
@@ -1661,6 +1667,11 @@ function monthKeyOfDate(dateStr) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
+function daysSince(dateStr) {
+  return Math.floor((Date.now() - new Date(dateStr + "T00:00:00").getTime()) / 86400000);
+}
+const STALE_DEBT_DAYS = 30;
+
 /* Arma el estado de cuenta mes a mes de una persona: los gastos en cuotas
    se reparten en cada mes que les corresponde (incluyendo meses futuros aún
    no facturados) y las devoluciones se cuentan en el mes real en que se
@@ -1719,96 +1730,178 @@ function generateFamilyPDF(person, gastos, devs, balance) {
   const doc = new jsPDF();
   const marginX = 14;
   const rightX = 196;
-  let y = 20;
+  const pageW = 210, pageH = 297;
 
-  doc.setFont("helvetica", "bold");
-  doc.setFontSize(16);
-  doc.text(`Reporte de gastos — ${person.name}`, marginX, y);
-  y += 7;
-  doc.setFont("helvetica", "normal");
-  doc.setFontSize(9);
-  doc.setTextColor(120);
-  doc.text(`Generado el ${new Date().toLocaleDateString("es-AR")}`, marginX, y);
-  doc.setTextColor(0);
-  y += 12;
+  const GOLD = [176, 133, 62];
+  const GOLD_LIGHT = [247, 238, 217];
+  const INK = [32, 27, 18];
+  const INK_TEXT = [38, 32, 22];
+  const GRAY = [132, 123, 105];
+  const RED = [163, 74, 56];
+  const GREEN = [59, 120, 82];
+  const ROW_ALT = [250, 246, 238];
 
-  const ensureSpace = (needed) => {
-    if (y + needed > 285) { doc.addPage(); y = 20; }
+  let y = 0;
+  let rowToggle = 0;
+
+  const drawHeaderBand = () => {
+    doc.setFillColor(...INK);
+    doc.rect(0, 0, pageW, 32, "F");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(8.5);
+    doc.setTextColor(...GOLD);
+    doc.text("EL CIERRE", marginX, 12);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7.5);
+    doc.setTextColor(190, 182, 165);
+    doc.text("CONTROL DE GASTOS", marginX + 23, 12);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(18);
+    doc.setTextColor(255, 255, 255);
+    doc.text(`Estado de cuenta — ${person.name}`, marginX, 23);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8.5);
+    doc.setTextColor(185, 178, 162);
+    doc.text(`Generado el ${new Date().toLocaleDateString("es-AR")}`, marginX, 28.5);
+    doc.setTextColor(...INK_TEXT);
   };
 
+  const drawContinuationHeader = () => {
+    doc.setFillColor(...GOLD);
+    doc.rect(0, 0, pageW, 3, "F");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(8.5);
+    doc.setTextColor(...GRAY);
+    doc.text(`Estado de cuenta — ${person.name} (continuación)`, marginX, 13);
+    doc.setTextColor(...INK_TEXT);
+  };
+
+  drawHeaderBand();
+  y = 42;
+
+  doc.setFillColor(...GOLD_LIGHT);
+  doc.roundedRect(marginX, y, rightX - marginX, 16, 2, 2, "F");
   doc.setFont("helvetica", "bold");
-  doc.setFontSize(12);
-  doc.text("Estado de cuenta por mes", marginX, y);
-  y += 3;
-  doc.setFont("helvetica", "normal");
   doc.setFontSize(8);
-  doc.setTextColor(120);
-  doc.text("Las compras en cuotas se reparten mes a mes; las devoluciones se cuentan en el mes en que se recibieron.", marginX, y + 5);
-  doc.setTextColor(0);
-  y += 12;
+  doc.setTextColor(...INK_TEXT);
+  doc.text("Cómo leer este resumen:", marginX + 4, y + 6);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(7.5);
+  doc.setTextColor(...GRAY);
+  doc.text("Saldo del mes = gastos menos devoluciones de ese mes puntual.   Saldo acumulado = lo que va quedando pendiente en total, mes a mes.", marginX + 4, y + 11.5);
+  doc.setTextColor(...INK_TEXT);
+  y += 24;
+
+  const ensureSpace = (needed) => {
+    if (y + needed > pageH - 16) {
+      doc.addPage();
+      drawContinuationHeader();
+      y = 22;
+      rowToggle = 0;
+    }
+  };
 
   const breakdown = buildFamilyMonthlyBreakdown(gastos, devs);
+
   if (breakdown.length === 0) {
+    doc.setFont("helvetica", "normal");
     doc.setFontSize(9);
-    doc.setTextColor(140);
+    doc.setTextColor(...GRAY);
     doc.text("Sin movimientos cargados.", marginX, y);
-    doc.setTextColor(0);
+    doc.setTextColor(...INK_TEXT);
     y += 8;
   } else {
     breakdown.forEach((m) => {
-      ensureSpace(20);
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(10);
-      doc.text(labelOfKey(m.monthKey), marginX, y);
-      y += 2;
-      doc.setDrawColor(210);
-      doc.line(marginX, y, rightX, y);
-      y += 5;
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(9);
+      ensureSpace(22);
 
-      m.gastoItems.forEach(({ tx, c }) => {
-        ensureSpace(8);
-        const desc = tx.description.length > 42 ? tx.description.slice(0, 42) + "…" : tx.description;
-        const cuotaLabel = tx.cuotas > 1 ? `  (cuota ${c.cuotaNum}/${c.total})` : "";
-        const usdLabel = tx.currency === "USD" && hasKnownRate(tx) ? ` (USD ${tx.amount.toFixed(2)})` : "";
-        doc.text(desc + cuotaLabel + usdLabel, marginX + 4, y);
-        doc.text(formatTxMonto(tx), rightX, y, { align: "right" });
-        y += 6;
-      });
-      m.repayItems.forEach((r) => {
-        ensureSpace(8);
-        doc.text(`Devolución${r.note ? " — " + r.note : ""}`, marginX + 4, y);
-        doc.text(`- ${fmt(r.amount)}`, rightX, y, { align: "right" });
+      doc.setFillColor(...INK);
+      doc.rect(marginX, y - 4.5, rightX - marginX, 7, "F");
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(9.5);
+      doc.setTextColor(255, 255, 255);
+      doc.text(labelOfKey(m.monthKey).toUpperCase(), marginX + 3, y);
+      doc.setTextColor(...INK_TEXT);
+      y += 7;
+
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8.7);
+
+      const allItems = [
+        ...m.gastoItems.map(({ tx, c }) => ({ type: "gasto", tx, c })),
+        ...m.repayItems.map((r) => ({ type: "repay", r })),
+      ];
+
+      allItems.forEach((item) => {
+        ensureSpace(7);
+        if (rowToggle % 2 === 0) {
+          doc.setFillColor(...ROW_ALT);
+          doc.rect(marginX, y - 4, rightX - marginX, 6, "F");
+        }
+        rowToggle++;
+
+        if (item.type === "gasto") {
+          const { tx, c } = item;
+          const desc = tx.description.length > 46 ? tx.description.slice(0, 46) + "…" : tx.description;
+          const cuotaLabel = tx.cuotas > 1 ? `  (cuota ${c.cuotaNum}/${c.total})` : "";
+          const usdLabel = tx.currency === "USD" && hasKnownRate(tx) ? ` · USD ${tx.amount.toFixed(2)}` : "";
+          doc.setTextColor(...INK_TEXT);
+          doc.text(desc + cuotaLabel + usdLabel, marginX + 3, y);
+          doc.setTextColor(...RED);
+          doc.text(formatTxMonto(tx), rightX - 2, y, { align: "right" });
+        } else {
+          const { r } = item;
+          doc.setTextColor(...INK_TEXT);
+          doc.text(`Devolución${r.note ? " — " + r.note : ""}`, marginX + 3, y);
+          doc.setTextColor(...GREEN);
+          doc.text(`- ${fmt(r.amount)}`, rightX - 2, y, { align: "right" });
+        }
+        doc.setTextColor(...INK_TEXT);
         y += 6;
       });
 
       ensureSpace(14);
-      doc.setDrawColor(230);
-      doc.line(marginX + 4, y, rightX, y);
-      y += 5;
+      doc.setFillColor(...GOLD_LIGHT);
+      doc.rect(marginX, y - 4, rightX - marginX, 7, "F");
       doc.setFont("helvetica", "bold");
-      doc.setFontSize(9);
-      doc.text("Saldo del mes:", marginX + 4, y);
-      doc.text(fmt(m.netMonth), rightX, y, { align: "right" });
-      y += 5.5;
-      doc.setTextColor(100);
-      doc.text("Saldo acumulado:", marginX + 4, y);
-      doc.text(fmt(m.running), rightX, y, { align: "right" });
-      doc.setTextColor(0);
+      doc.setFontSize(8.7);
+      doc.setTextColor(...INK_TEXT);
+      doc.text("Saldo del mes", marginX + 3, y);
+      doc.text(fmt(m.netMonth), rightX - 2, y, { align: "right" });
+      y += 7;
+      doc.setFont("helvetica", "italic");
+      doc.setFontSize(7.7);
+      doc.setTextColor(...GRAY);
+      doc.text("Saldo acumulado", marginX + 3, y);
+      doc.text(fmt(m.running), rightX - 2, y, { align: "right" });
+      doc.setTextColor(...INK_TEXT);
       y += 10;
+      rowToggle = 0;
     });
   }
 
-  ensureSpace(14);
-  doc.setDrawColor(160);
-  doc.setLineWidth(0.4);
-  doc.line(marginX, y, rightX, y);
+  ensureSpace(28);
+  const balColor = balance > 0 ? RED : GREEN;
+  doc.setDrawColor(...GOLD);
+  doc.setLineWidth(0.6);
+  doc.roundedRect(marginX, y, rightX - marginX, 18, 2, 2, "S");
   doc.setLineWidth(0.2);
-  y += 8;
   doc.setFont("helvetica", "bold");
-  doc.setFontSize(12);
-  doc.text(`Saldo pendiente: ${fmt(balance)}`, marginX, y);
+  doc.setFontSize(9);
+  doc.setTextColor(...GRAY);
+  doc.text("SALDO PENDIENTE TOTAL", marginX + 5, y + 7);
+  doc.setFontSize(15);
+  doc.setTextColor(...balColor);
+  doc.text(fmt(balance), rightX - 5, y + 12.5, { align: "right" });
+  doc.setTextColor(...INK_TEXT);
+
+  const totalPages = doc.internal.getNumberOfPages();
+  for (let p = 1; p <= totalPages; p++) {
+    doc.setPage(p);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7.5);
+    doc.setTextColor(...GRAY);
+    doc.text(`Página ${p} de ${totalPages}`, rightX, pageH - 8, { align: "right" });
+  }
 
   doc.save(`gastos-${person.name.replace(/\s+/g, "_").toLowerCase()}-${new Date().toISOString().slice(0, 10)}.pdf`);
 }
@@ -1827,11 +1920,18 @@ function FamilyView({ data, monthKey, onAddRepayment, onDeleteRepayment, onAddFa
     const pendingUSD = gastos.filter(tx => tx.currency === "USD" && !hasKnownRate(tx)).reduce((a, tx) => a + tx.amount, 0);
     const devs = repayments.filter(r => r.personId === p.id);
     const totalDevs = devs.reduce((a, r) => a + r.amount, 0);
-    return { person: p, gastos, devs, totalGastos, totalDevs, pendingUSD, balance: totalGastos - totalDevs };
+    const balance = totalGastos - totalDevs;
+    const lastRepayDate = devs.length ? devs.reduce((max, r) => (r.date > max ? r.date : max), devs[0].date) : null;
+    const oldestGastoDate = gastos.length ? gastos.reduce((min, tx) => (tx.date < min ? tx.date : min), gastos[0].date) : null;
+    const referenceDate = lastRepayDate || oldestGastoDate;
+    const daysStale = referenceDate ? daysSince(referenceDate) : null;
+    const isStale = balance > 0.5 && daysStale !== null && daysStale >= STALE_DEBT_DAYS;
+    return { person: p, gastos, devs, totalGastos, totalDevs, pendingUSD, balance, daysStale, isStale };
   }), [familyMembers, transactions, repayments]);
 
   const totalAdeudado = balances.reduce((a, b) => a + b.balance, 0);
   const current = balances.find(b => b.person.id === selected);
+  const staleBalances = balances.filter(b => b.isStale);
 
   return (
     <div>
@@ -1841,6 +1941,17 @@ function FamilyView({ data, monthKey, onAddRepayment, onDeleteRepayment, onAddFa
           Total que me deben: {fmt(totalAdeudado)}
         </div>
       </div>
+
+      {staleBalances.length > 0 && (
+        <div className="ect-backup-banner">
+          <BellRing size={15} />
+          <span>
+            {staleBalances.length === 1
+              ? `${staleBalances[0].person.name} no te devuelve nada hace ${staleBalances[0].daysStale} días.`
+              : `${staleBalances.map(b => `${b.person.name} (${b.daysStale}d)`).join(", ")} no te devuelven hace tiempo.`}
+          </span>
+        </div>
+      )}
 
       <div className="ect-grid ect-family-grid">
         {balances.map(b => (
@@ -1855,6 +1966,11 @@ function FamilyView({ data, monthKey, onAddRepayment, onDeleteRepayment, onAddFa
             </div>
             {b.pendingUSD > 0 && (
               <div style={{ fontSize: 11.5, color: "var(--blue)", marginTop: 4 }}>+ {fmtUSD(b.pendingUSD)} sin TC</div>
+            )}
+            {b.isStale && (
+              <div className="ect-badge" style={{ color: "var(--red)", borderColor: "var(--red)", marginTop: 6 }}>
+                <BellRing size={10} style={{ verticalAlign: "-1px", marginRight: 3 }} />{b.daysStale} días sin devolución
+              </div>
             )}
             <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginTop: 8 }}>
               {b.gastos.length} gasto(s) · {b.devs.length} devolución(es)
@@ -1944,7 +2060,7 @@ function FamilyView({ data, monthKey, onAddRepayment, onDeleteRepayment, onAddFa
       )}
 
       {showRepay && current && (
-        <RepaymentForm person={current.person} onClose={() => setShowRepay(false)} onSave={(r) => { onAddRepayment(r); setShowRepay(false); }} />
+        <RepaymentForm person={current.person} balance={current.balance} onClose={() => setShowRepay(false)} onSave={(r) => { onAddRepayment(r); setShowRepay(false); }} />
       )}
 
       {showNewTx && current && (
